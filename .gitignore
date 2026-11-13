@@ -37,3 +37,10 @@ reference/someip-interfaces.json
 
 # browser automation scratch
 .playwright-mcp/
+
+# SQLite side files
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.db-wal
+*.db-shm

@@ -86,6 +86,23 @@ export function isMoving(s: VehicleSnapshot): boolean | null {
   return s.speed.value > MOVING_ABOVE_KMH;
 }
 
+/**
+ * How old a speed reading may be and still say whether the car is moving. The head unit uploads a snapshot once a
+ * minute while driving, so two minutes covers one missed upload; this is a freshness window, not a vehicle limit.
+ */
+export const MOTION_FRESH_MS = 120000;
+
+/**
+ * Whether the car is moving right now, as far as `now` can tell: null when the speed is unavailable or its reading
+ * is older than MOTION_FRESH_MS (a car that stopped reporting is not "still moving"). A reading dated after `now`
+ * (clock went backwards) counts as fresh.
+ */
+export function isMovingNow(s: VehicleSnapshot, now: number): boolean | null {
+  if (!s.speed.available) return null;
+  if (now - s.speed.at > MOTION_FRESH_MS) return null;
+  return s.speed.value > MOVING_ABOVE_KMH;
+}
+
 /** True only when the gear stage is available and 'R'. */
 export function isReversing(s: VehicleSnapshot): boolean {
   return s.gearStage.available && s.gearStage.value === 'R';
