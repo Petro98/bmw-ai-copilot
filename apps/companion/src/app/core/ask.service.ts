@@ -1,13 +1,23 @@
-import { Injectable, signal } from '@angular/core';
-import type { ApiError, AskRequest, AskStreamEvent, AskStyle, DialogTurn } from '@copilot/shared';
+import { Injectable, inject, signal } from '@angular/core';
+import { Router } from '@angular/router';
+import type { ApiError, AskRequest, AskSource, AskStreamEvent, AskStyle, DialogTurn } from '@copilot/shared';
+import { LOGIN_PATH, safeReturnUrl } from '../features/login/login.page';
 import { parseSse } from './sse-parser';
 
 /** Shown when no answer and no server message arrived (network down, stream cut off). */
 export const ASK_FAILED_MESSAGE = 'Не вдалося отримати відповідь. Перевірте з\'єднання і спробуйте ще раз.';
 
+export interface AskOptions {
+  /** Who asks: the typed panel (default) or the voice flow. */
+  source?: AskSource;
+  /** Receives each whole sentence of a spoken answer as it arrives (`sentence` events, style 'spoken' only). */
+  onSentence?: (text: string) => void;
+}
+
 /** Asks a question over `POST /api/ask/stream` and exposes the answer as it grows. */
 @Injectable({ providedIn: 'root' })
 export class AskService {
+  private readonly router = inject(Router);
   private readonly pendingState = signal(false);
   private readonly partialState = signal('');
   private readonly errorState = signal<string | null>(null);
@@ -21,7 +31,7 @@ export class AskService {
   private controller: AbortController | null = null;
 
   /** Resolves with the stored turn, or null when the question failed or was cancelled. */
-  async ask(text: string, style: AskStyle = 'full'): Promise<DialogTurn | null> {
+  async ask(text: string, style: AskStyle = 'full', options: AskOptions = {}): Promise<DialogTurn | null> {
     this.cancel();
     const controller = new AbortController();
     this.controller = controller;
@@ -29,7 +39,7 @@ export class AskService {
     this.partialState.set('');
     this.errorState.set(null);
 
-    const request: AskRequest = { text, style, source: 'panel' };
+    const request: AskRequest = { text, style, source: options.source ?? 'panel' };
     try {
       const response = await fetch('/api/ask/stream', {
         method: 'POST',
@@ -37,8 +47,13 @@ export class AskService {
         body: JSON.stringify(request),
         signal: controller.signal,
       });
+      if (response.status === 401) {
+        // The session has expired: «Вхід», as the HttpClient interceptor does; no error is left on screen.
+        if (this.controller === controller) this.toLogin();
+        return null;
+      }
       const outcome = response.ok && response.body
-        ? await this.readStream(response.body, controller)
+        ? await this.readStream(response.body, controller, options.onSentence)
         : { turn: null, error: await errorMessageOf(response) };
       if (this.controller !== controller) return null;
       if (outcome.turn) return outcome.turn;
@@ -65,8 +80,15 @@ export class AskService {
     this.partialState.set('');
   }
 
+  /** Same destination and return address as `unauthorizedInterceptor` (features/login/login.page.ts). */
+  private toLogin(): void {
+    const current = this.router.url.split('#')[0];
+    if (current.startsWith(LOGIN_PATH)) return;
+    void this.router.navigate([LOGIN_PATH], { queryParams: { return: safeReturnUrl(current) } });
+  }
+
   private async readStream(
-    body: ReadableStream<Uint8Array>, controller: AbortController,
+    body: ReadableStream<Uint8Array>, controller: AbortController, onSentence?: (text: string) => void,
   ): Promise<{ turn: DialogTurn | null; error: string | null }> {
     const reader = body.getReader();
     const decoder = new TextDecoder();
@@ -82,6 +104,8 @@ export class AskService {
           if (!event) continue;
           if (event.type === 'delta' && this.controller === controller) {
             this.partialState.update((text) => text + event.text);
+          } else if (event.type === 'sentence') {
+            if (this.controller === controller && typeof event.text === 'string') onSentence?.(event.text);
           } else if (event.type === 'done') {
             return { turn: event.turn, error: null };
           } else if (event.type === 'error') {

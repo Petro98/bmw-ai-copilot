@@ -2,14 +2,52 @@
   <section class="card" [attr.aria-busy]="ask.pending()">
     <span class="phone-label who">ВИ</span>
     <p class="question" data-question>{{ ex.question }}</p>
-    <span class="phone-label who divider">COPILOT</span>
     @if (ex.error) {
+      <span class="phone-label who divider">COPILOT</span>
       <p class="error" role="alert" data-error>{{ ex.error }}</p>
-    } @else {
+    } @else if (ex.answer !== null) {
+      <span class="phone-label who divider">COPILOT</span>
       <p class="answer-text" data-answer [class.answer-driving]="moving()" [class.phone-body]="!moving()">{{ ex.answer }}</p>
     }
   </section>
 }
+
+<section class="talk" aria-label="Голос">
+  <button type="button" class="talk-button" data-talk
+    [attr.aria-label]="talkLabel()" [disabled]="talkDisabled()" (click)="onTalk()">
+    @if (talkIdle()) {
+      <svg aria-hidden="true" width="76" height="76" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+        stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0"></path><path d="M12 18v3"></path></svg>
+    } @else {
+      <svg aria-hidden="true" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+        stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>
+    }
+  </button>
+  @if (meter()) {
+    <svg class="meter" data-meter aria-hidden="true" width="92" height="32" viewBox="0 0 92 32">
+      <rect x="0" y="12" width="4" height="8" rx="2"></rect>
+      <rect x="8" y="8" width="4" height="16" rx="2"></rect>
+      <rect x="16" y="4" width="4" height="24" rx="2"></rect>
+      <rect x="24" y="10" width="4" height="12" rx="2"></rect>
+      <rect x="32" y="2" width="4" height="28" rx="2"></rect>
+      <rect x="40" y="6" width="4" height="20" rx="2"></rect>
+      <rect x="48" y="12" width="4" height="8" rx="2"></rect>
+      <rect x="56" y="8" width="4" height="16" rx="2"></rect>
+      <rect x="64" y="4" width="4" height="24" rx="2"></rect>
+      <rect x="72" y="10" width="4" height="12" rx="2"></rect>
+      <rect x="80" y="6" width="4" height="20" rx="2"></rect>
+      <rect x="88" y="12" width="4" height="8" rx="2"></rect>
+    </svg>
+  }
+  <p class="talk-state" data-talk-state aria-live="polite">{{ talkStateText() }}</p>
+  <span class="phone-label talk-lang">УКРАЇНСЬКА</span>
+  @if (talkMessage(); as note) {
+    <p class="talk-message" role="status" data-talk-message>{{ note }}</p>
+  }
+  @if (voiceNote(); as note) {
+    <p class="talk-message" role="status" data-voice-note>{{ note }}</p>
+  }
+</section>
 
 @if (ask.pending()) {
   <button type="button" class="secondary" (click)="ask.cancel()">Скасувати</button>
@@ -32,7 +70,7 @@
 
 <div class="chips">
   @for (topic of topics(); track topic) {
-    <button type="button" class="chip" data-chip [disabled]="ask.pending()" (click)="send(topic)">{{ topic }}</button>
+    <button type="button" class="chip" data-chip [disabled]="busy()" (click)="send(topic)">{{ topic }}</button>
   }
 </div>
 
@@ -41,7 +79,7 @@
     <label class="phone-label field-label" for="question">ВАШЕ ПИТАННЯ</label>
     <div class="field-row">
       <input id="question" type="text" autocomplete="off" enterkeyhint="send"
-        [attr.maxlength]="maxChars" [value]="draft()" [disabled]="ask.pending()" (input)="onInput($event)">
+        [attr.maxlength]="maxChars" [value]="draft()" [disabled]="busy()" (input)="onInput($event)">
       <button type="submit" class="send" [disabled]="!canSend()">Запитати</button>
     </div>
     @if (draft().length >= counterFrom) {

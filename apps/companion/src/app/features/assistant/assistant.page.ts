@@ -1,10 +1,14 @@
-import { Component, Injectable, OnInit, computed, inject, signal } from '@angular/core';
-import type { DialogTurn } from '@copilot/shared';
+import { Component, DOCUMENT, Injectable, OnDestroy, OnInit, computed, inject, signal } from '@angular/core';
+import type { AskStyle, DialogTurn } from '@copilot/shared';
 import type { VehicleSnapshot } from '@copilot/vehicle-core';
 import { ApiService } from '../../core/api.service';
-import { AskService } from '../../core/ask.service';
+import { AskOptions, AskService } from '../../core/ask.service';
 import { LiveService } from '../../core/live.service';
+import { SPEECH_RECOGNIZER, SPEECH_SPEAKER } from '../../speech/speech.tokens';
 import { eventTime } from '../../shared/alert-row/alert-row';
+import { NO_VOICE_TEXT, TalkController } from './talk.controller';
+import { TALK_TEXT, TalkState } from './talk.machine';
+import { ScreenWakeLock, WakeLockNavigator } from './wake-lock';
 
 /** The topic chips, each sending exactly this question (plan 1, Task 15). */
 export const TOPICS: readonly string[] = [
@@ -41,6 +45,14 @@ function mergeTurns(first: DialogTurn[], second: DialogTurn[]): DialogTurn[] {
   return Array.from(byId.values()).sort((a, b) => b.at - a.at).slice(0, EARLIER_TURNS + 1);
 }
 
+/** The state line under the talk button (plan 3, Task 3): the state is always said in words, not by colour. */
+export const TALK_STATE_TEXT: Record<TalkState, string> = {
+  idle: 'Натисніть і говоріть',
+  listening: 'Слухаю…',
+  thinking: 'Думаю…',
+  speaking: 'Відповідаю…',
+};
+
 interface Exchange { question: string; answer: string | null; error: string | null }
 
 /**
@@ -56,16 +68,21 @@ export class AssistantState {
   readonly asked = signal<string | null>(null);
 }
 
-/** The assistant screen (docs/design/mockups/PhoneTalk.dc.html without the microphone, which Plan 3 adds). */
+/**
+ * The assistant screen (docs/design/mockups/PhoneTalk.dc.html): push-to-talk in Ukrainian above the typed question
+ * and the topic chips of Plan 1. The microphone opens only from a tap on the talk button.
+ */
 @Component({
   selector: 'app-assistant-page',
   templateUrl: './assistant.page.html',
   styleUrl: './assistant.page.css',
 })
-export class AssistantPage implements OnInit {
+export class AssistantPage implements OnInit, OnDestroy {
   private readonly api = inject(ApiService);
   private readonly live = inject(LiveService);
   protected readonly ask = inject(AskService);
+  private readonly document = inject(DOCUMENT);
+  private readonly recognizer = inject(SPEECH_RECOGNIZER);
 
   protected readonly maxChars = MAX_QUESTION_CHARS;
   protected readonly counterFrom = COUNTER_FROM;
@@ -81,6 +98,8 @@ export class AssistantPage implements OnInit {
 
   /** The last exchange: the question in flight with its growing answer or its error, otherwise the newest turn. */
   protected readonly exchange = computed<Exchange | null>(() => {
+    const talk = this.talk.model();
+    if (talk.state === 'listening' && talk.transcript) return { question: talk.transcript, answer: null, error: null };
     const question = this.asked();
     if (question !== null && this.showingAsked()) {
       const pending = this.ask.pending();
@@ -95,13 +114,58 @@ export class AssistantPage implements OnInit {
     return this.turns().slice(skip, skip + EARLIER_TURNS);
   });
 
-  protected readonly canSend = computed(() => !this.ask.pending() && this.draft().trim().length > 0);
+  protected readonly canSend = computed(() => !this.busy() && this.draft().trim().length > 0);
+
+  /** Voice: the talk flow drives the same exchange display as a typed question. */
+  private readonly talk = new TalkController(this.recognizer, inject(SPEECH_SPEAKER), {
+    ask: (text, style, options) => this.askFor(text, style, options),
+    cancel: () => this.ask.cancel(),
+    error: () => this.ask.error(),
+  });
+  protected readonly canListen = this.recognizer.isSupported();
+  protected readonly talkState = computed(() => this.talk.model().state);
+  protected readonly talkIdle = computed(() => this.talkState() === 'idle');
+  protected readonly talkLabel = computed(() => (this.talkIdle() ? 'Говорити' : 'Зупинити'));
+  protected readonly talkStateText = computed(() => TALK_STATE_TEXT[this.talkState()]);
+  /** The level meter: only while listening or speaking (the one permitted animation, docs/design/README.md → Motion). */
+  protected readonly meter = computed(() => this.talkState() === 'listening' || this.talkState() === 'speaking');
+  /** A typed question in flight keeps the talk button off until it is answered or cancelled. */
+  protected readonly talkDisabled = computed(() => !this.canListen || (this.talkIdle() && this.ask.pending()));
+  /** One instruction at a time; an answer error already shown in the card is not repeated here. */
+  protected readonly talkMessage = computed(() => {
+    if (!this.canListen) return TALK_TEXT.unsupported;
+    const message = this.talk.model().message;
+    return message !== null && message !== this.exchange()?.error ? message : null;
+  });
+  protected readonly voiceNote = computed(() => (this.talk.voiceMissing() ? NO_VOICE_TEXT : null));
+  /** Chips and the text field wait while a question is in flight or the microphone is in use. */
+  protected readonly busy = computed(() => this.ask.pending() || !this.talkIdle());
+
+  private readonly wakeLock = new ScreenWakeLock(
+    this.document, this.document.defaultView?.navigator as WakeLockNavigator | undefined,
+  );
+  private readonly onVisibility = () => {
+    if (this.document.visibilityState === 'hidden') this.talk.pageHidden();
+  };
 
   ngOnInit(): void {
     this.api.dialog(EARLIER_TURNS + 1).subscribe({
       next: (loaded) => this.turns.update((local) => mergeTurns(local, loaded)),
       error: () => undefined,
     });
+    this.document.addEventListener('visibilitychange', this.onVisibility);
+    this.wakeLock.start();
+  }
+
+  ngOnDestroy(): void {
+    this.document.removeEventListener('visibilitychange', this.onVisibility);
+    this.wakeLock.stop();
+    this.talk.destroy();
+  }
+
+  protected onTalk(): void {
+    if (this.talkDisabled()) return;
+    this.talk.tap();
   }
 
   protected onInput(event: Event): void {
@@ -115,13 +179,25 @@ export class AssistantPage implements OnInit {
 
   protected async send(text: string, fromField = false): Promise<void> {
     const question = text.trim();
-    if (!question || this.ask.pending()) return;
+    if (!question || this.busy()) return;
     this.asked.set(question);
     const turn = await this.ask.ask(question);
     if (!turn) return;                      // the error, if any, stays on screen in place of the answer
+    this.stored(turn);
+    if (fromField) this.draft.set('');
+  }
+
+  /** A voice question: shown and stored like a typed one. */
+  private async askFor(text: string, style: AskStyle, options: AskOptions): Promise<DialogTurn | null> {
+    this.asked.set(text);
+    const turn = await this.ask.ask(text, style, options);
+    if (turn) this.stored(turn);
+    return turn;
+  }
+
+  private stored(turn: DialogTurn): void {
     this.turns.update((turns) => mergeTurns([turn], turns));
     this.asked.set(null);
-    if (fromField) this.draft.set('');
   }
 
   protected time(at: number): string {
