@@ -5,7 +5,7 @@ import {
   APIUserAbortError,
   RateLimitError,
 } from '@anthropic-ai/sdk';
-import { ClaudeError, type ClaudeErrorCode } from '../types';
+import { ClaudeError, type BilledAttempt, type ClaudeErrorCode } from '../types';
 
 const RETRYABLE: Readonly<Record<ClaudeErrorCode, boolean>> = {
   'refusal': false,
@@ -39,9 +39,13 @@ export function userMessageFor(code: ClaudeErrorCode): string {
   return USER_MESSAGES[code];
 }
 
-/** Builds a ClaudeError whose message is assembled only from safe, fixed parts. */
-export function claudeError(code: ClaudeErrorCode, detail?: string): ClaudeError {
-  return new ClaudeError(code, detail ? `Claude request failed: ${code} (${detail})` : `Claude request failed: ${code}`, RETRYABLE[code]);
+/**
+ * Builds a ClaudeError whose message is assembled only from safe, fixed parts. `billed` is passed
+ * when the failed request was nonetheless billed; it holds token counts and model ids only.
+ */
+export function claudeError(code: ClaudeErrorCode, detail?: string, billed?: BilledAttempt[]): ClaudeError {
+  const message = detail ? `Claude request failed: ${code} (${detail})` : `Claude request failed: ${code}`;
+  return new ClaudeError(code, message, RETRYABLE[code], billed);
 }
 
 /**

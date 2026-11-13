@@ -1,5 +1,5 @@
 import type { Clock } from '@copilot/vehicle-core';
-import type { Usage, UsageStore } from '../types';
+import type { BilledAttempt, Usage, UsageStore } from '../types';
 import { costUsd } from './prices';
 
 export interface CostGuardOptions { dailyUsdLimit: number; monthlyUsdLimit: number; requestsPerMinute: number; clock: Clock; store: UsageStore }
@@ -48,6 +48,17 @@ export class CostGuard {
     const usd = costUsd(model, usage);
     this.options.store.add(dayKey(this.options.clock.now()), model, usage, usd);
     return usd;
+  }
+
+  /**
+   * Stores every billed attempt of one request (`ClaudeResult.billed`, or `ClaudeError.billed` for a
+   * request that failed but was billed), each priced by its own model, and returns the total in USD.
+   * Use it in place of `record` for that request, not in addition to it.
+   */
+  recordBilled(billed: ReadonlyArray<BilledAttempt>): number {
+    let total = 0;
+    for (const attempt of billed) total += this.record(attempt.model, attempt.usage);
+    return total;
   }
 
   totals(): { dayUsd: number; monthUsd: number } {

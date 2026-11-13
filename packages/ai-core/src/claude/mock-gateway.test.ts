@@ -43,6 +43,7 @@ describe('MockClaudeGateway', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(result.model).toBe('mock');
     expect(result.usage).toEqual({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 });
+    expect(result.billed).toEqual([{ model: 'mock', usage: result.usage }]);
     expect(result.text.startsWith('Демо-режим без Claude. ')).toBe(true);
     expect(result.text).toContain('Температура масла: 92 °C');
     expect(result.text).toContain('Температура охолоджувальної рідини: 88 °C');

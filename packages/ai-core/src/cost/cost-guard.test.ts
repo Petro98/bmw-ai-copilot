@@ -148,6 +148,40 @@ describe('CostGuard', () => {
     expect(store.rows).toEqual([{ day: '2026-11-13', model: 'claude-opus-5-5', usage: u, usd }]);
   });
 
+  test('recordBilled stores every billed attempt at its own model price and returns the sum', () => {
+    const { g, store } = guard({ dailyUsdLimit: 1 });
+    const declined = usage(3000, 100, 2000, 500);
+    const answered = usage(4000, 300);
+    const usd = g.recordBilled([
+      { model: 'claude-opus-5-5', usage: declined },
+      { model: 'claude-opus-5', usage: answered },
+    ]);
+    const expected = costUsd('claude-opus-5-5', declined) + costUsd('claude-opus-5', answered);
+    expect(usd).toBeCloseTo(expected, 12);
+    expect(store.rows).toEqual([
+      { day: '2026-11-13', model: 'claude-opus-5-5', usage: declined, usd: costUsd('claude-opus-5-5', declined) },
+      { day: '2026-11-13', model: 'claude-opus-5', usage: answered, usd: costUsd('claude-opus-5', answered) },
+    ]);
+    expect(g.totals().dayUsd).toBeCloseTo(expected, 12);
+  });
+
+  test('recordBilled counts toward the budget like record, and an empty list records nothing', () => {
+    const { g, store } = guard({ dailyUsdLimit: 1 });
+    expect(g.recordBilled([])).toBe(0);
+    expect(store.rows).toEqual([]);
+    g.recordBilled([
+      { model: 'claude-opus-5-5', usage: usage(0, 30_000) },                      // $0.6
+      { model: 'claude-opus-5-5', usage: usage(0, 20_000) },                      // +0.4 → 1.0
+    ]);
+    expect(g.admit()).toEqual({ allowed: false, reason: 'daily-budget' });
+  });
+
+  test('recordBilled prices an unknown model with the fallback price', () => {
+    const { g } = guard();
+    const u = usage(1000, 1000);
+    expect(g.recordBilled([{ model: 'some-future-model', usage: u }])).toBeCloseTo(costUsd('some-future-model', u), 12);
+  });
+
   test('a clock moving backwards does not make admit() throw or go negative', () => {
     const { g, clock } = guard({ requestsPerMinute: 2 });
     g.record('claude-opus-5-5', usage(0, 1000));

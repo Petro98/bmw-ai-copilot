@@ -35,7 +35,8 @@ export class MockClaudeGateway implements ClaudeGateway {
       options.onDelta?.(i < words.length - 1 ? `${words[i]} ` : words[i]!);
     }
 
-    return { text, model: 'mock', usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } };
+    const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    return { text, model: 'mock', usage, billed: [{ model: 'mock', usage }] };
   }
 }
 

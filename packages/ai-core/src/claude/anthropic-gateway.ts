@@ -1,5 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
-import type { AskOptions, BuiltPrompt, ClaudeGateway, ClaudeResult } from '../types';
+import type { AskOptions, BilledAttempt, BuiltPrompt, ClaudeGateway, ClaudeResult, Usage } from '../types';
 import { claudeError, toClaudeError } from './errors';
 import { rulesFor } from './model-rules';
 
@@ -45,26 +45,54 @@ export class AnthropicGateway implements ClaudeGateway {
       throw toClaudeError(error);
     }
 
+    // Read before any stop_reason check: a refusal or an empty answer is still billed.
+    const usage = toUsage(message.usage);
+    const billed = billedAttempts(message.usage.iterations, usage, message.model, options.model);
+
     // stop_reason before content: a refusal (after any fallback) carries no usable answer,
     // even when part of a text was streamed before the decline.
-    if (message.stop_reason === 'refusal') throw claudeError('refusal', 'stop_reason refusal');
+    if (message.stop_reason === 'refusal') throw claudeError('refusal', 'stop_reason refusal', billed);
 
     let text = '';
     for (const block of message.content) {
       if (block.type === 'text') text += block.text;
     }
-    if (text.trim() === '') throw claudeError('empty-answer', `stop_reason ${message.stop_reason ?? 'null'}`);
+    if (text.trim() === '') throw claudeError('empty-answer', `stop_reason ${message.stop_reason ?? 'null'}`, billed);
 
-    const usage = message.usage;
-    return {
-      text,
-      model: message.model,
-      usage: {
-        inputTokens: usage.input_tokens ?? 0,
-        outputTokens: usage.output_tokens ?? 0,
-        cacheReadTokens: usage.cache_read_input_tokens ?? 0,
-        cacheWriteTokens: usage.cache_creation_input_tokens ?? 0,
-      },
-    };
+    return { text, model: message.model, usage, billed };
   }
+}
+
+/** The token counters of one usage object (top level or one iteration); missing counters become 0. */
+interface UsageCounters {
+  input_tokens?: number | null; output_tokens?: number | null;
+  cache_read_input_tokens?: number | null; cache_creation_input_tokens?: number | null;
+}
+
+function toUsage(usage: UsageCounters): Usage {
+  return {
+    inputTokens: usage.input_tokens ?? 0,
+    outputTokens: usage.output_tokens ?? 0,
+    cacheReadTokens: usage.cache_read_input_tokens ?? 0,
+    cacheWriteTokens: usage.cache_creation_input_tokens ?? 0,
+  };
+}
+
+/**
+ * Every billed attempt of the turn. With the server-side refusal fallback, `usage.iterations`
+ * (SDK 1.8.0 `BetaIterationsUsage`) is the per-attempt record: a declined hop is a `message`
+ * entry and the answering hop a `fallback_message` entry, each naming its model, while the
+ * top-level `usage` covers only the attempt that produced the message (claude-api skill,
+ * shared/model-migration.md → refusal section, "Billing"). Without iterations the top-level
+ * usage is the one attempt. An entry without a model is billed under the requested model.
+ */
+function billedAttempts(
+  iterations: ReadonlyArray<UsageCounters & { model?: string | null }> | null | undefined,
+  usage: Usage, messageModel: string, requestedModel: string,
+): BilledAttempt[] {
+  if (!iterations || iterations.length === 0) return [{ model: messageModel, usage }];
+  return iterations.map((entry) => ({
+    model: typeof entry.model === 'string' && entry.model !== '' ? entry.model : requestedModel,
+    usage: toUsage(entry),
+  }));
 }
