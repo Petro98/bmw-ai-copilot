@@ -1,11 +1,14 @@
 import type { FastifyInstance } from 'fastify';
 import type { AskResponse, AskStreamEvent } from '@copilot/shared';
+import { SentenceSplitter } from '../../assistant/sentence-splitter';
 import type { RouteContext } from '../app';
 import { toApiError } from '../errors';
 import { parseAskRequest } from '../schemas';
 
 /**
  * `POST /api/ask` (one JSON answer) and `POST /api/ask/stream` (SSE: `delta`… then `done`, or one `error`).
+ * For `style: 'spoken'` the stream also carries `sentence` events, each whole sentence as soon as it is complete;
+ * the remainder is flushed before `done`, and nothing follows an `error`.
  * The question text is never logged at info level: it is the owner's words.
  */
 export function askRoutes(app: FastifyInstance, ctx: RouteContext): void {
@@ -31,10 +34,20 @@ export function askRoutes(app: FastifyInstance, ctx: RouteContext): void {
       if (!finished) controller.abort();   // a client that disconnects aborts the Claude request
     });
     const send = (event: AskStreamEvent): void => stream.send(event.type, event);
+    // A spoken answer also goes out sentence by sentence, so the phone can start speaking before it is complete.
+    const splitter = ask.style === 'spoken' ? new SentenceSplitter() : null;
+    const sendSentences = (sentences: string[]): void => {
+      for (const text of sentences) send({ type: 'sentence', text });
+    };
+    const onDelta = (text: string): void => {
+      send({ type: 'delta', text });
+      if (splitter) sendSentences(splitter.push(text));
+    };
 
     try {
-      const turn = await ctx.assistant.ask(ask, (text) => send({ type: 'delta', text }), controller.signal);
+      const turn = await ctx.assistant.ask(ask, onDelta, controller.signal);
       finished = true;
+      if (splitter) sendSentences(splitter.flush());   // the rest of the answer, before done; never after an error
       send({ type: 'done', turn });
       ctx.publishStatus();
     } catch (error) {
