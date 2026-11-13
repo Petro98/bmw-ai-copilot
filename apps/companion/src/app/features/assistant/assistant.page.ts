@@ -1,9 +1,10 @@
 import { Component, DOCUMENT, Injectable, OnDestroy, OnInit, computed, inject, signal } from '@angular/core';
 import type { AskStyle, DialogTurn } from '@copilot/shared';
-import type { VehicleSnapshot } from '@copilot/vehicle-core';
 import { ApiService } from '../../core/api.service';
 import { AskOptions, AskService } from '../../core/ask.service';
+import { currentTime } from '../../core/clock';
 import { LiveService } from '../../core/live.service';
+import { movingNow } from '../../core/vehicle-state';
 import { SPEECH_RECOGNIZER, SPEECH_SPEAKER } from '../../speech/speech.tokens';
 import { eventTime } from '../../shared/alert-row/alert-row';
 import { NO_VOICE_TEXT, TalkController } from './talk.controller';
@@ -26,17 +27,8 @@ const DRIVING_TOPICS = 3;
 const MAX_QUESTION_CHARS = 500;
 const COUNTER_FROM = 400;
 const EARLIER_TURNS = 20;
-/**
- * Same rule as `isMoving` / `MOVING_ABOVE_KMH` in packages/vehicle-core/src/snapshot.ts (kit convention,
- * idrive7-apps@4a8deb7:kit/runtime/parked.js:18 `MAX_KMH = 3`); repeated here because the panel imports
- * vehicle-core type-only. An unknown speed counts as not moving, as there.
- */
-const MOVING_ABOVE_KMH = 3;
-
-function isMoving(snapshot: VehicleSnapshot | null): boolean {
-  const speed = snapshot?.speed;
-  return !!speed && speed.available && speed.value > MOVING_ABOVE_KMH;
-}
+/** How often the motion rule is checked again with no new snapshot, so a speed that went stale ends the driving layout. */
+const MOTION_CHECK_EVERY_MS = 5_000;
 
 /** Newest first, one copy per id. */
 function mergeTurns(first: DialogTurn[], second: DialogTurn[]): DialogTurn[] {
@@ -76,6 +68,8 @@ export class AssistantState {
   selector: 'app-assistant-page',
   templateUrl: './assistant.page.html',
   styleUrl: './assistant.page.css',
+  // The driving layout (assistant.page.css): the button and its state line stay on screen however long the answer.
+  host: { '[class.driving]': 'moving()' },
 })
 export class AssistantPage implements OnInit, OnDestroy {
   private readonly api = inject(ApiService);
@@ -92,7 +86,9 @@ export class AssistantPage implements OnInit, OnDestroy {
   private readonly asked = this.state.asked;
   protected readonly draft = signal('');
 
-  protected readonly moving = computed(() => isMoving(this.live.snapshot()));
+  /** The rule of `isMovingNow` (packages/vehicle-core/src/snapshot.ts): a speed older than two minutes is not motion. */
+  private readonly clock = currentTime(MOTION_CHECK_EVERY_MS);
+  protected readonly moving = computed(() => movingNow(this.live.snapshot(), this.clock()));
   protected readonly topics = computed(() => (this.moving() ? TOPICS.slice(0, DRIVING_TOPICS) : TOPICS));
   private readonly showingAsked = computed(() => this.asked() !== null && (this.ask.pending() || this.ask.error() !== null));
 

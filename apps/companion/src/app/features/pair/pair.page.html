@@ -11,7 +11,7 @@
       <p class="explain" role="status">{{ text.done }} Екран авто покаже це під час наступного звернення до сервера.</p>
     }
     @default {
-      <p class="explain">Головний блок авто просить доступу до Copilot. Підʼєднайте його, якщо цей код показує ваше авто.</p>
+      <p class="explain" data-pair-check>{{ text.check }}</p>
       <form class="form" (submit)="register($event, label)">
         <span class="field-label">Пристрій</span>
         <span class="device-id" data-device-id>{{ deviceId() }}</span>

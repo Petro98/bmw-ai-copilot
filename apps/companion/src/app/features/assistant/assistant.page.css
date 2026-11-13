@@ -16,6 +16,29 @@
   background: var(--surface);
 }
 
+/*
+ * While moving (plan 3, Global Constraints: the screen shows the button, the state and the short answer): the page is
+ * exactly as tall as the content area. The card keeps its place above the button (PhoneTalk.dc.html) but takes only
+ * the room left over and scrolls inside itself, so a long answer in the large `answer-driving` style never pushes the
+ * button or the state line below the screen. It never shrinks below its label and the first result line: 20 + 16 + 6
+ * + 52 + 20 px (padding, label, gap, the two-line 17/26 error, which is taller than one 46 px `answer-driving` line),
+ * and once a result exists the question gives way (assistant.page.html), so the card opens on the answer or the
+ * error. On a small phone it is the chips, last on the page, that go below the screen, never the result.
+ */
+:host(.driving) {
+  height: 100%;
+}
+
+:host(.driving) > * {
+  flex-shrink: 0;
+}
+
+:host(.driving) > .card {
+  flex-shrink: 1;
+  min-height: 114px;
+  overflow-y: auto;
+}
+
 .who,
 .meta,
 .counter,
@@ -112,7 +135,8 @@ button:disabled {
 
 .chip {
   padding: 0 var(--space-3);
-  border: 1px solid var(--line);
+  /* A control's edge: `line-strong` (docs/design/tokens.json: `line` is never the sole sign of a control). */
+  border: 1px solid var(--line-strong);
   background: var(--surface-raised);
   color: var(--ink);
   font-size: 17px;

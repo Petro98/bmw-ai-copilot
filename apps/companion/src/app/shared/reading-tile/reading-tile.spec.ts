@@ -5,7 +5,9 @@ import { ReadingTile } from './reading-tile';
 
 const NOW = 1_000_000;
 
-async function render(inputs: { label: string; reading: Reading<number | string>; now: number; target?: Reading<number> | null }): Promise<HTMLElement> {
+async function render(inputs: {
+  label: string; reading: Reading<number | string>; now: number; target?: Reading<number> | null; unavailableNote?: string | null;
+}): Promise<HTMLElement> {
   await TestBed.configureTestingModule({ imports: [ReadingTile] }).compileComponents();
   const fixture = TestBed.createComponent(ReadingTile);
   for (const [name, value] of Object.entries(inputs)) fixture.componentRef.setInput(name, value);
@@ -22,6 +24,16 @@ describe('ReadingTile', () => {
     expect(el.querySelector('[data-note]')?.textContent?.trim()).toBe('Потрібне діагностичне читання. Воно вимкнене в налаштуваннях.');
     expect(el.textContent).toContain('МАСЛО');
     expect(el.textContent).not.toMatch(/\d/);
+  });
+
+  it('puts the page\'s note in place of the reason when given, and only for an unavailable reading', async () => {
+    const el = await render({ label: 'МАСЛО', reading: unavailable('not-reported'), now: NOW, unavailableNote: 'Дані ще не отримано.' });
+    expect(el.querySelector('[data-value]')?.textContent?.trim()).toBe('Недоступно');
+    expect(el.querySelector('[data-note]')?.textContent?.trim()).toBe('Дані ще не отримано.');
+
+    TestBed.resetTestingModule();
+    const fresh = await render({ label: 'МАСЛО', reading: available(92, '°C', 'mock', NOW), now: NOW, unavailableNote: 'Дані ще не отримано.' });
+    expect(fresh.querySelector('[data-note]')).toBeNull();
   });
 
   it('shows the value with its unit and no note for a fresh reading', async () => {

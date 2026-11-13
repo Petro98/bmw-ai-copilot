@@ -1,5 +1,5 @@
 import { TestBed } from '@angular/core/testing';
-import { of } from 'rxjs';
+import { of, throwError } from 'rxjs';
 import type { AlertEvent } from '@copilot/event-engine';
 import type { StatusDto } from '@copilot/shared';
 import type { VehicleSnapshot } from '@copilot/vehicle-core';
@@ -190,6 +190,60 @@ describe('LiveService', () => {
     expect(sources.length).toBe(1);
     expect(sources[0].closed).toBe(true);
     expect(live.connected()).toBe(false);
+  });
+
+  it('asks for the status over HTTP when the stream fails, so a 401 there reaches the sign-in redirect', () => {
+    const live = create();
+    live.connect();
+    expect(api.status).not.toHaveBeenCalled();
+    sources[0].fail();
+    expect(api.status).toHaveBeenCalledTimes(1);
+  });
+
+  it('says whether the alert list has loaded; it stays loaded when the stream drops', () => {
+    const live = create();
+    live.connect();
+    expect(live.alertsLoaded()).toBe(false);
+    sources[0].emit('alert', { type: 'alert', alert: alert('x', 10) });
+    expect(live.alertsLoaded()).toBe(false);              // one streamed alert is not the recent list
+    sources[0].open();
+    expect(live.alertsLoaded()).toBe(true);
+    sources[0].fail();
+    expect(live.alertsLoaded()).toBe(true);
+  });
+
+  it('stays not loaded when the REST alert list fails', () => {
+    api.alerts.mockReturnValue(throwError(() => new Error('down')));
+    const live = create();
+    live.connect();
+    sources[0].open();
+    expect(live.alertsLoaded()).toBe(false);
+  });
+
+  it('reconnectNow opens a new stream at once and resets the delay', () => {
+    const live = create();
+    live.connect();
+    for (let i = 0; i < 5; i++) {
+      sources[sources.length - 1].fail();
+      vi.runOnlyPendingTimers();
+    }
+    sources[sources.length - 1].fail();                  // the next attempt would be 30 s away
+    const before = sources.length;
+    live.reconnectNow();
+    expect(sources.length).toBe(before + 1);
+    vi.advanceTimersByTime(60_000);
+    expect(sources.length).toBe(before + 1);             // the pending retry was cancelled
+    sources[sources.length - 1].fail();
+    vi.advanceTimersByTime(1000);
+    expect(sources.length).toBe(before + 2);             // and the delay starts again from 1 s
+  });
+
+  it('reconnectNow does nothing after disconnect', () => {
+    const live = create();
+    live.connect();
+    live.disconnect();
+    live.reconnectNow();
+    expect(sources.length).toBe(1);
   });
 
   it('connect is idempotent while a stream is open', () => {

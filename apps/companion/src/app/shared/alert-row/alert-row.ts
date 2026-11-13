@@ -19,14 +19,41 @@ const MONTHS_GENITIVE = [
   'ЛИПНЯ', 'СЕРПНЯ', 'ВЕРЕСНЯ', 'ЖОВТНЯ', 'ЛИСТОПАДА', 'ГРУДНЯ',
 ];
 
-/** When something happened, for a tag line: «12:36» today, «ВЧОРА», otherwise «9 ЛИСТОПАДА» (local time). */
-export function eventTime(at: number, now: number): string {
+/** Which day `at` falls on, seen from `now` (local time). */
+export function dayOf(at: number, now: number): 'today' | 'yesterday' | 'earlier' {
   const when = new Date(at);
   const today = new Date(now);
-  if (sameDay(when, today)) return `${pad(when.getHours())}:${pad(when.getMinutes())}`;
+  if (sameDay(when, today)) return 'today';
   const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
-  if (sameDay(when, yesterday)) return 'ВЧОРА';
+  return sameDay(when, yesterday) ? 'yesterday' : 'earlier';
+}
+
+/** «12:36» (local time). */
+export function clockTime(at: number): string {
+  const when = new Date(at);
+  return `${pad(when.getHours())}:${pad(when.getMinutes())}`;
+}
+
+/** «9 ЛИСТОПАДА» (local time). */
+export function dateText(at: number): string {
+  const when = new Date(at);
   return `${when.getDate()} ${MONTHS_GENITIVE[when.getMonth()]}`;
+}
+
+/** When something happened, for a tag line: «12:36» today, «ВЧОРА», otherwise «9 ЛИСТОПАДА» (local time). */
+export function eventTime(at: number, now: number): string {
+  const day = dayOf(at, now);
+  return day === 'today' ? clockTime(at) : day === 'yesterday' ? 'ВЧОРА' : dateText(at);
+}
+
+/**
+ * When the car stopped reporting an alert: «ЗНЯТО О 12:39», «ЗНЯТО ВЧОРА», «ЗНЯТО 9 ЛИСТОПАДА», or «ЗНЯТО» when the
+ * time is not known. The head-unit screen's words (car/src/ui/strings.uk.ts `clearedAt`).
+ */
+export function clearedText(clearedAt: number | null, now: number): string {
+  if (clearedAt === null || !Number.isFinite(clearedAt)) return 'ЗНЯТО';
+  const day = dayOf(clearedAt, now);
+  return 'ЗНЯТО ' + (day === 'today' ? `О ${clockTime(clearedAt)}` : day === 'yesterday' ? 'ВЧОРА' : dateText(clearedAt));
 }
 
 function sameDay(a: Date, b: Date): boolean {
@@ -40,7 +67,8 @@ function pad(n: number): string {
 /**
  * One alert in the list (docs/design/mockups/PhoneCar.dc.html): severity icon — triangle for warning,
  * octagon for critical, circle for information — the title, and the tag line
- * `<severity word> · <provenance tag> · <time>`.
+ * `<severity word> · <provenance tag> · <time>`. For a cleared alert the time part says so in words
+ * («ЗНЯТО О 12:39»), as on the head-unit screen; its title is dimmed as well, but the words carry the state.
  */
 @Component({
   selector: 'app-alert-row',
@@ -80,8 +108,9 @@ function pad(n: number): string {
     .text { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
     .title { font-size: 17px; line-height: 26px; font-weight: 500; overflow-wrap: anywhere; }
     .tags { color: var(--ink-dim); }
+    :host([data-active='false']) .title { color: var(--ink-dim); }
   `,
-  host: { '[attr.data-severity]': 'alert().severity' },
+  host: { '[attr.data-severity]': 'alert().severity', '[attr.data-active]': 'alert().active' },
 })
 export class AlertRow {
   readonly alert = input.required<AlertEvent>();
@@ -89,5 +118,9 @@ export class AlertRow {
   readonly now = input<number | null>(null);
 
   protected readonly severityWord = computed(() => SEVERITY_WORD[this.alert().severity] ?? SEVERITY_WORD.warning);
-  protected readonly time = computed(() => eventTime(this.alert().at, this.now() ?? Date.now()));
+  protected readonly time = computed(() => {
+    const alert = this.alert();
+    const now = this.now() ?? Date.now();
+    return alert.active ? eventTime(alert.at, now) : clearedText(alert.clearedAt, now);
+  });
 }

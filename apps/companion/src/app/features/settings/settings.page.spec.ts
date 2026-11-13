@@ -6,7 +6,7 @@ import type { DeviceDto, ScenarioDto, SettingsDto, StatusDto } from '@copilot/sh
 import { ApiService } from '../../core/api.service';
 import { LiveService } from '../../core/live.service';
 import { DeviceApi } from '../pair/pair.page';
-import { SettingsPage, formatDateTime } from './settings.page';
+import { LOAD_PAGE, SettingsPage, formatDateTime } from './settings.page';
 
 const SETTINGS: SettingsDto = {
   ownerLimits: { oilTempMaxC: 115, coolantTempMaxC: null, battery12vMinPercent: null, tyrePressureDeviationBar: null },
@@ -36,13 +36,18 @@ const DEVICES: DeviceDto[] = [
 describe('SettingsPage', () => {
   let devices: { list: ReturnType<typeof vi.fn>; remove: ReturnType<typeof vi.fn>; register: ReturnType<typeof vi.fn> };
   let live: { status: ReturnType<typeof signal<StatusDto | null>> };
-  let api: { settings: ReturnType<typeof vi.fn>; saveSettings: ReturnType<typeof vi.fn>; scenarios: ReturnType<typeof vi.fn>; setScenario: ReturnType<typeof vi.fn> };
+  let api: {
+    settings: ReturnType<typeof vi.fn>; saveSettings: ReturnType<typeof vi.fn>; scenarios: ReturnType<typeof vi.fn>;
+    setScenario: ReturnType<typeof vi.fn>; endSession: ReturnType<typeof vi.fn>;
+  };
+  let loadPage: ReturnType<typeof vi.fn>;
 
   async function render(): Promise<{ el: HTMLElement; update: () => Promise<void> }> {
     await TestBed.configureTestingModule({
       imports: [SettingsPage],
       providers: [
         { provide: LiveService, useValue: live }, { provide: ApiService, useValue: api }, { provide: DeviceApi, useValue: devices },
+        { provide: LOAD_PAGE, useValue: loadPage },
       ],
     }).compileComponents();
     const fixture = TestBed.createComponent(SettingsPage);
@@ -64,7 +69,9 @@ describe('SettingsPage', () => {
       saveSettings: vi.fn((s: SettingsDto) => of(s)),
       scenarios: vi.fn(() => of(SCENARIO_LIST)),
       setScenario: vi.fn((id: string) => of({ id })),
+      endSession: vi.fn(() => of(undefined)),
     };
+    loadPage = vi.fn();
   });
 
   it('shows the four owner limits as the owner\'s own, each «Не задано» or its value', async () => {
@@ -171,6 +178,9 @@ describe('SettingsPage', () => {
     expect(diagnostics.disabled).toBe(true);
     expect(diagnostics.checked).toBe(false);
     expect(text(el.querySelector('label[for="diagnostics"]'))).toContain('Вимкнено, доки ви не погодите перевірку в авто');
+    // One apostrophe in all copy: U+02BC, as in «Підʼєднати».
+    expect(text(el.querySelector('label[for="diagnostics"]'))).toContain('Читання памʼяті помилок');
+    expect(el.textContent).not.toContain("'");
   });
 
   it('shows the models and today\'s and this month\'s spend against the budgets', async () => {
@@ -196,6 +206,13 @@ describe('SettingsPage', () => {
     expect(api.setScenario).toHaveBeenCalledWith('signals-missing');
   });
 
+  it('a scenario list that does not load says so in its own words', async () => {
+    api.scenarios.mockReturnValue(throwError(() => new HttpErrorResponse({ status: 503 })));
+    const { el } = await render();
+    expect(el.textContent).toContain('Не вдалося завантажити демо-сценарії. Спробуйте ще раз.');
+    expect(el.textContent).not.toContain('Не вдалося завантажити налаштування');
+  });
+
   it('the scenario selector is absent when the vehicle source is car', async () => {
     live.status.set(status('car'));
     const { el } = await render();
@@ -217,18 +234,41 @@ describe('SettingsPage', () => {
     expect(rows.map((row) => text(row.querySelector('button')))).toEqual(['Відʼєднати', 'Відʼєднати']);
   });
 
-  it('«Відʼєднати» revokes a device and removes its row; a failure keeps it and says so', async () => {
+  it('«Відʼєднати» asks for confirmation in the row; «Скасувати» keeps the device', async () => {
     const { el, update } = await render();
-    const unpair = (id: string) => el.querySelector<HTMLButtonElement>(`[data-device="${id}"] button`)!;
-    devices.remove.mockReturnValueOnce(throwError(() => new HttpErrorResponse({ status: 500 })));
-    unpair('test-device-000000000002').click();
+    const row = (id: string) => el.querySelector(`[data-device="${id}"]`)!;
+    const rowButton = (id: string, label: string) =>
+      Array.from(row(id).querySelectorAll('button')).find((b) => text(b) === label);
+    rowButton('test-device-000000000002', 'Відʼєднати')!.click();
     await update();
+    expect(devices.remove).not.toHaveBeenCalled();
+    expect(Array.from(row('test-device-000000000002').querySelectorAll('button')).map(text))
+      .toEqual(['Підтвердити відʼєднання', 'Скасувати']);
+    // Only that row asks.
+    expect(Array.from(row('test-device-000000000001').querySelectorAll('button')).map(text)).toEqual(['Відʼєднати']);
+    rowButton('test-device-000000000002', 'Скасувати')!.click();
+    await update();
+    expect(devices.remove).not.toHaveBeenCalled();
+    expect(Array.from(row('test-device-000000000002').querySelectorAll('button')).map(text)).toEqual(['Відʼєднати']);
+  });
+
+  it('a confirmed «Відʼєднати» revokes a device and removes its row; a failure keeps it and says so', async () => {
+    const { el, update } = await render();
+    const unpair = async (id: string) => {
+      el.querySelector<HTMLButtonElement>(`[data-device="${id}"] button`)!.click();
+      await update();
+      const confirm = Array.from(el.querySelectorAll<HTMLButtonElement>(`[data-device="${id}"] button`))
+        .find((b) => text(b) === 'Підтвердити відʼєднання')!;
+      confirm.click();
+      await update();
+    };
+    devices.remove.mockReturnValueOnce(throwError(() => new HttpErrorResponse({ status: 500 })));
+    await unpair('test-device-000000000002');
     expect(devices.remove).toHaveBeenCalledWith('test-device-000000000002');
     expect(el.querySelectorAll('[data-device]')).toHaveLength(2);
     expect(text(el.querySelector('[data-devices-error]'))).toBe('Не вдалося відʼєднати пристрій. Спробуйте ще раз.');
 
-    unpair('test-device-000000000002').click();
-    await update();
+    await unpair('test-device-000000000002');
     expect(Array.from(el.querySelectorAll('[data-device]')).map((row) => row.getAttribute('data-device'))).toEqual(['test-device-000000000001']);
     expect(el.querySelector('[data-devices-error]')).toBeNull();
   });
@@ -237,6 +277,22 @@ describe('SettingsPage', () => {
     devices.list.mockReturnValue(of([]));
     const { el } = await render();
     expect(el.textContent).toContain('Немає підʼєднаних пристроїв. Відскануйте QR-код на екрані авто, щоб підʼєднати його.');
+  });
+
+  it('«Вийти» ends the session on the server and opens the sign-in page afresh', async () => {
+    const { el, update } = await render();
+    api.endSession.mockReturnValueOnce(throwError(() => new HttpErrorResponse({ status: 0 })));
+    button(el, 'Вийти').click();
+    await update();
+    expect(api.endSession).toHaveBeenCalledTimes(1);
+    expect(loadPage).not.toHaveBeenCalled();
+    expect(text(el.querySelector('[data-sign-out-error]'))).toBe('Не вдалося вийти. Спробуйте ще раз.');
+
+    button(el, 'Вийти').click();
+    await update();
+    expect(api.endSession).toHaveBeenCalledTimes(2);
+    // A full page load: nothing of the signed-in session (dialog, readings, the event stream) stays in memory.
+    expect(loadPage).toHaveBeenCalledWith('/login');
   });
 
   it('formats times as day, month, year and hour in local time', () => {

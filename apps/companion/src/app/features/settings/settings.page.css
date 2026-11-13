@@ -151,7 +151,17 @@ button:disabled {
   opacity: 0.5;
 }
 
-/* A paired device: label and times on the left, «Відʼєднати» on the right. */
+/* A paired device: label and times on the left, «Відʼєднати» (or its confirmation) on the right. */
 .row > .secondary {
   flex-shrink: 0;
+}
+
+.row:has(> .confirm) {
+  flex-wrap: wrap;
+}
+
+.confirm {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
 }

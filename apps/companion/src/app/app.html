@@ -1,27 +1,17 @@
 <div class="shell">
   <header class="top-bar">
-    <span class="phone-title">{{ heading() }}</span>
-    <div class="marks phone-label">
-      <span class="mark" data-mark="vehicle" [attr.data-state]="vehicleOk() ? 'on' : 'off'">
-        @if (vehicleOk()) {
-          <svg class="mark-icon on" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg>
-        } @else {
-          <svg class="mark-icon off" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12h12"></path></svg>
-        }
-        АВТО
-        <span class="visually-hidden">{{ vehicleOk() ? 'підключено' : 'не підключено' }}</span>
-      </span>
-      <span class="mark" data-mark="claude" [attr.data-state]="claudeOk() ? 'on' : 'off'">
-        @if (claudeOk()) {
-          <svg class="mark-icon on" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg>
-        } @else {
-          <svg class="mark-icon off" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12h12"></path></svg>
-        }
-        CLAUDE
-        <span class="visually-hidden">{{ claudeOk() ? 'підключено' : 'не підключено' }}</span>
-      </span>
+    <h1 class="phone-title title">{{ heading() }}</h1>
+    <div class="marks">
+      <app-status-mark name="vehicle" label="АВТО" [on]="vehicleOk()" [demo]="vehicleDemo()" />
+      <app-status-mark name="claude" label="CLAUDE" [on]="claudeOk()" />
     </div>
   </header>
+
+  @if (vehicleDemo()) {
+    <p class="demo" role="note" data-demo>
+      <span class="phone-label demo-label">{{ demoLabel }}</span> {{ demoText }}
+    </p>
+  }
 
   <main class="content">
     <router-outlet />

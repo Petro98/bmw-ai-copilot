@@ -27,6 +27,8 @@ export const routes: Routes = [
     path: 'pair', data: { heading: 'Підʼєднати авто' } satisfies ScreenData,
     // Takes the device secret out of the address bar and out of the Router's URL tree before the page loads.
     canActivate: [pairingFragmentGuard],
+    // Also for a fragment-only navigation: a pairing link that arrives while /pair is already shown.
+    runGuardsAndResolvers: 'always',
     loadComponent: () => import('./features/pair/pair.page').then((m) => m.PairPage),
   },
   { path: '**', redirectTo: '' },

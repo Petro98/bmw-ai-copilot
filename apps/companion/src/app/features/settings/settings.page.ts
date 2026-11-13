@@ -1,5 +1,8 @@
+import { DOCUMENT } from '@angular/common';
 import { HttpErrorResponse } from '@angular/common/http';
-import { Component, OnInit, computed, effect, inject, linkedSignal, signal, untracked } from '@angular/core';
+import {
+  Component, InjectionToken, OnInit, computed, effect, inject, linkedSignal, signal, untracked,
+} from '@angular/core';
 import type { OwnerLimits } from '@copilot/event-engine';
 import type { DeviceDto, ScenarioDto, SettingsDto } from '@copilot/shared';
 import type { ScenarioId } from '@copilot/vehicle-core';
@@ -20,8 +23,22 @@ export const LIMITS: ReadonlyArray<LimitView> = [
 
 const SAVE_FAILED = 'Не вдалося зберегти. Спробуйте ще раз.';
 const LOAD_FAILED = 'Не вдалося завантажити налаштування. Спробуйте ще раз.';
+const SCENARIOS_FAILED = 'Не вдалося завантажити демо-сценарії. Спробуйте ще раз.';
+const SIGN_OUT_FAILED = 'Не вдалося вийти. Спробуйте ще раз.';
 const DEVICES_FAILED = 'Не вдалося завантажити список пристроїв. Спробуйте ще раз.';
 const UNPAIR_FAILED = 'Не вдалося відʼєднати пристрій. Спробуйте ще раз.';
+
+/**
+ * Opens an address with a full page load. After signing out it opens «Вхід» so that nothing of the signed-in session
+ * (the dialog, the readings, the open event stream) stays in the page's memory. A token so specs can watch it.
+ */
+export const LOAD_PAGE = new InjectionToken<(url: string) => void>('LOAD_PAGE', {
+  providedIn: 'root',
+  factory: () => {
+    const document = inject(DOCUMENT);
+    return (url: string) => document.location.assign(url);
+  },
+});
 
 const two = (n: number): string => String(n).padStart(2, '0');
 
@@ -53,6 +70,7 @@ export class SettingsPage implements OnInit {
   private readonly api = inject(ApiService);
   private readonly live = inject(LiveService);
   private readonly deviceApi = inject(DeviceApi);
+  private readonly loadPage = inject(LOAD_PAGE);
 
   protected readonly limits = LIMITS;
   protected readonly settings = signal<SettingsDto | null>(null);
@@ -88,6 +106,10 @@ export class SettingsPage implements OnInit {
   protected readonly devices = signal<DeviceDto[] | null>(null);
   protected readonly devicesError = signal<string | null>(null);
   protected readonly removing = signal<string | null>(null);
+  /** The device whose row asks «Підтвердити відʼєднання»: one stray tap must not revoke the head unit. */
+  protected readonly confirming = signal<string | null>(null);
+  protected readonly signingOut = signal(false);
+  protected readonly signOutError = signal<string | null>(null);
   protected readonly formatDateTime = formatDateTime;
 
   constructor() {
@@ -99,7 +121,7 @@ export class SettingsPage implements OnInit {
         next: (list) => this.scenarios.set(list),
         error: (error: unknown) => {
           this.scenariosRequested = false;
-          this.scenarioError.set(errorMessage(error, LOAD_FAILED));
+          this.scenarioError.set(errorMessage(error, SCENARIOS_FAILED));
         },
       }));
     });
@@ -116,9 +138,19 @@ export class SettingsPage implements OnInit {
     });
   }
 
-  /** «Відʼєднати»: the backend refuses the device's requests from now on. */
+  /** «Відʼєднати», first step: the row asks to confirm (or «Скасувати»). */
+  protected askUnpair(device: DeviceDto): void {
+    if (this.removing() === null) this.confirming.set(device.deviceId);
+  }
+
+  protected cancelUnpair(): void {
+    this.confirming.set(null);
+  }
+
+  /** «Підтвердити відʼєднання»: the backend refuses the device's requests from now on. */
   protected unpair(device: DeviceDto): void {
-    if (this.removing() !== null) return;
+    if (this.removing() !== null || this.confirming() !== device.deviceId) return;
+    this.confirming.set(null);
     this.removing.set(device.deviceId);
     this.devicesError.set(null);
     this.deviceApi.remove(device.deviceId).subscribe({
@@ -129,6 +161,20 @@ export class SettingsPage implements OnInit {
       error: (error: unknown) => {
         this.removing.set(null);
         this.devicesError.set(errorMessage(error, UNPAIR_FAILED));
+      },
+    });
+  }
+
+  /** «Вийти»: the backend clears the session cookie, then «Вхід» opens with a full page load. */
+  protected signOut(): void {
+    if (this.signingOut()) return;
+    this.signingOut.set(true);
+    this.signOutError.set(null);
+    this.api.endSession().subscribe({
+      next: () => this.loadPage('/login'),
+      error: (error: unknown) => {
+        this.signingOut.set(false);
+        this.signOutError.set(errorMessage(error, SIGN_OUT_FAILED));
       },
     });
   }

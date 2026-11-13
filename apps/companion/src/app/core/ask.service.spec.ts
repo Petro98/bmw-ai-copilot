@@ -1,4 +1,5 @@
 import { TestBed } from '@angular/core/testing';
+import { Router } from '@angular/router';
 import type { AskStreamEvent, DialogTurn } from '@copilot/shared';
 import { ASK_FAILED_MESSAGE, AskService } from './ask.service';
 
@@ -84,6 +85,7 @@ describe('AskService', () => {
   it('shows a generic message when the network fails or the stream ends without an answer', async () => {
     fetchMock.mockRejectedValueOnce(new TypeError('Failed to fetch'));
     await expect(service.ask('Питання')).resolves.toBeNull();
+    expect(ASK_FAILED_MESSAGE).toBe('Не вдалося отримати відповідь. Перевірте зʼєднання і спробуйте ще раз.');   // U+02BC, as in all copy
     expect(service.error()).toBe(ASK_FAILED_MESSAGE);
 
     fetchMock.mockResolvedValueOnce(streamResponse(splitBytes(frame({ type: 'delta', text: 'Ма' }), 1000)));
@@ -111,6 +113,16 @@ describe('AskService', () => {
     expect(service.pending()).toBe(false);
     expect(service.error()).toBeNull();
     expect(service.partial()).toBe('');
+  });
+
+  it('a 401 sends the owner to «Вхід» through the shared redirect and leaves no error', async () => {
+    const router = TestBed.inject(Router);
+    const navigate = vi.spyOn(router, 'navigate').mockResolvedValue(true);
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ error: { code: 'unauthorized', message: 'Потрібно увійти.' } }), { status: 401 }));
+    expect(await service.ask('Як почувається авто?')).toBeNull();
+    expect(navigate).toHaveBeenCalledWith(['/login'], { queryParams: { return: '/' } });
+    expect(service.error()).toBeNull();
+    expect(service.pending()).toBe(false);
   });
 
   it('a new question clears the previous error and partial text', async () => {

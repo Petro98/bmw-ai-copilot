@@ -189,7 +189,7 @@ describe('installable app', () => {
     };
 
     it('proxies the car link unbuffered, above the 25 s dialog long poll, with a 1 MB body limit', () => {
-      const car = block('/car/v1/');
+      const car = block('^~ /car/v1/');
       expect(car).toContain('proxy_pass http://backend:3000;');
       expect(car).toContain('proxy_buffering off;');
       expect(car).toContain('client_max_body_size 1m;');
@@ -198,9 +198,29 @@ describe('installable app', () => {
     });
 
     it('keeps the API unbuffered and never caches index.html or the service worker scripts', () => {
-      expect(block('/api/')).toContain('proxy_buffering off;');
+      expect(block('^~ /api/')).toContain('proxy_buffering off;');
       for (const path of ['/index.html', '/copilot-sw.js', '/ngsw-worker.js', '/ngsw.json', '/safety-worker.js', '/worker-basic.min.js']) {
         expect(block(`= ${path}`)).toContain('add_header Cache-Control "no-cache"');
+      }
+    });
+
+    it('lets no regex location outrank the API and car-link proxies', () => {
+      // A plain prefix loses to a matching regex (the *.js long-cache rule); `^~` stops the regex search.
+      expect(conf).not.toMatch(/location \/api\/ \{/);
+      expect(conf).not.toMatch(/location \/car\/v1\/ \{/);
+      expect(conf).toContain('location ^~ /api/ {');
+      expect(conf).toContain('location ^~ /car/v1/ {');
+    });
+
+    it('sends the basic security headers from every location, including those with their own add_header', () => {
+      const headers = ['add_header X-Content-Type-Options "nosniff" always;', 'add_header Referrer-Policy "no-referrer" always;'];
+      const server = conf.slice(0, conf.search(/\n\s*location /));
+      for (const header of headers) expect(server).toContain(header);
+      // nginx inherits server-level add_header only into locations that have none of their own.
+      const locations = conf.split(/\n\s*location /).slice(1).map((rest) => rest.slice(0, rest.indexOf('}')));
+      expect(locations.length).toBeGreaterThanOrEqual(10);
+      for (const location of locations.filter((l) => l.includes('add_header'))) {
+        for (const header of headers) expect(location, location.split('\n')[0]).toContain(header);
       }
     });
   });

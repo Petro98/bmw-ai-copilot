@@ -2,6 +2,7 @@ import { HttpClient, HttpErrorResponse, type HttpInterceptorFn } from '@angular/
 import { Component, inject, signal } from '@angular/core';
 import { ActivatedRoute, Router } from '@angular/router';
 import { catchError, throwError } from 'rxjs';
+import { LiveService } from '../../core/live.service';
 
 export const LOGIN_PATH = '/login';
 const SESSION_URL = '/api/session';
@@ -24,18 +25,24 @@ export function safeReturnUrl(value: unknown): string {
 }
 
 /**
- * A 401 from any API call (except the sign-in itself) sends the owner to «Вхід», which returns to the current page
- * afterwards. The return address is taken without its fragment.
+ * Opens «Вхід», which returns to the current page afterwards (its address without the fragment). Does nothing while
+ * the owner is already there. Every 401 the panel meets ends here.
+ */
+export function goToLogin(router: Router): void {
+  const current = router.url.split('#')[0];
+  if (current.startsWith(LOGIN_PATH)) return;
+  void router.navigate([LOGIN_PATH], { queryParams: { return: safeReturnUrl(current) } });
+}
+
+/**
+ * A 401 from any API call (except the sign-in itself) sends the owner to «Вхід» (`goToLogin`).
  */
 export const unauthorizedInterceptor: HttpInterceptorFn = (request, next) => {
   const router = inject(Router);
   return next(request).pipe(
     catchError((error: unknown) => {
       if (error instanceof HttpErrorResponse && error.status === 401 && !request.url.startsWith(SESSION_URL)) {
-        const current = router.url.split('#')[0];
-        if (!current.startsWith(LOGIN_PATH)) {
-          void router.navigate([LOGIN_PATH], { queryParams: { return: safeReturnUrl(current) } });
-        }
+        goToLogin(router);
       }
       return throwError(() => error);
     }),
@@ -64,6 +71,7 @@ export class LoginPage {
   private readonly http = inject(HttpClient);
   private readonly router = inject(Router);
   private readonly route = inject(ActivatedRoute);
+  private readonly live = inject(LiveService);
 
   protected readonly busy = signal(false);
   protected readonly error = signal<string | null>(null);
@@ -82,6 +90,8 @@ export class LoginPage {
       next: () => {
         field.value = '';
         this.busy.set(false);
+        // The stream failed while signed out and may be waiting up to 30 s for its next try: open it now.
+        this.live.reconnectNow();
         void this.router.navigateByUrl(safeReturnUrl(this.route.snapshot.queryParamMap.get('return')));
       },
       error: (error: unknown) => {

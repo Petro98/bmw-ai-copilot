@@ -12,7 +12,7 @@ import { formatReading } from '../../core/format';
   template: `
     <span class="phone-label label" data-label>{{ label() }}</span>
     <span class="value" data-value>{{ formatted().text }}@if (unitLine(); as unit) {<span class="unit"> {{ unit }}</span>}</span>
-    @if (formatted().note; as note) {
+    @if (noteText(); as note) {
       <span class="note" data-note>{{ note }}</span>
     }
   `,
@@ -47,7 +47,14 @@ export class ReadingTile {
   /** The car's own target (tyre pressure); left out when the car did not send it. */
   readonly target = input<Reading<number> | null>(null);
 
+  /** Replaces the reason under «Недоступно» when the page knows better (no data has arrived at all). */
+  readonly unavailableNote = input<string | null>(null);
+
   protected readonly formatted = computed(() => formatReading(this.reading(), this.now()));
+  protected readonly noteText = computed(() => {
+    const formatted = this.formatted();
+    return (!formatted.available && this.unavailableNote()) || formatted.note;
+  });
 
   protected readonly unitLine = computed(() => {
     const value = this.formatted();

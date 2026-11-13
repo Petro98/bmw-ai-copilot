@@ -5,7 +5,10 @@ import type { AlertEvent } from '@copilot/event-engine';
 import type { DialogTurn, ScenarioDto, SettingsDto, StatusDto } from '@copilot/shared';
 import type { ScenarioId, VehicleSnapshot } from '@copilot/vehicle-core';
 
-/** The backend REST API (HTTP contract of Plan 1 Task 1). Nothing here reaches the vehicle: the only writes are the owner's settings and the mock scenario. */
+/**
+ * The backend REST API (HTTP contract of Plan 1 Task 1). Nothing here reaches the vehicle: the only writes are the
+ * owner's settings, the mock scenario and the end of the owner's own session.
+ */
 @Injectable({ providedIn: 'root' })
 export class ApiService {
   private readonly http = inject(HttpClient);
@@ -43,5 +46,10 @@ export class ApiService {
 
   setScenario(id: ScenarioId): Observable<{ id: ScenarioId }> {
     return this.http.post<{ id: ScenarioId }>('/api/mock/scenario', { id });
+  }
+
+  /** Sign out: the backend clears the session cookie (`DELETE /api/session`, 204). */
+  endSession(): Observable<void> {
+    return this.http.delete<void>('/api/session');
   }
 }

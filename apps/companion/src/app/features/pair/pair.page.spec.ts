@@ -64,6 +64,9 @@ describe('PairPage', () => {
     expect(window.location.pathname).toBe('/pair');
     expect(text(el.querySelector('[data-device-id]'))).toBe(DEVICE_ID);
     expect(api.list).toHaveBeenCalledTimes(1);   // the session probe
+    // The car's screen shows no device id to compare with: the page asks only for what the owner can check.
+    expect(text(el.querySelector('[data-pair-check]'))).toBe(
+      'Головний блок авто просить доступу до Copilot. Підʼєднайте його, лише якщо ви щойно відсканували QR-код на екрані свого авто.');
 
     const label = el.querySelector<HTMLInputElement>('input#pair-label')!;
     expect(label.value).toBe('Головний блок');
@@ -171,6 +174,78 @@ describe('the pairing address through the Router', () => {
     expect((harness.routeNativeElement as HTMLElement).textContent)
       .toContain('Посилання для підʼєднання неповне. Відскануйте QR-код на екрані авто ще раз.');
     TestBed.inject(HttpTestingController).expectNone('/api/devices');
+  });
+
+  /*
+   * A link that arrives in the window already showing /pair (a second scan, the installed app's window) is a
+   * fragment-only navigation: no reload, and by default no guard run and no new page. It must still be taken out of
+   * the address bar and the Router's URL tree at once, and the page must show what it carried.
+   */
+  it('a pairing link that arrives while /pair is already shown is taken, stripped and shown', async () => {
+    const { harness, router, location } = await open('/pair');
+    const controller = TestBed.inject(HttpTestingController);
+    const draft = TestBed.inject(PairingDraft);
+    const el = () => harness.routeNativeElement as HTMLElement;
+    harness.detectChanges();
+    expect(el().textContent).toContain('Відскануйте QR-код на екрані авто, щоб відкрити цю сторінку');
+
+    /** What the browser does with a link to the same page: the address changes, then the app navigates. */
+    const arrive = async (url: string) => {
+      window.history.pushState(null, '', url);
+      await router.navigateByUrl(url);
+      await harness.fixture.whenStable();
+      harness.detectChanges();
+    };
+    const expectStripped = () => {
+      expect(router.url).toBe('/pair');
+      expect(location.path(true)).toBe('/pair');
+      expect(window.location.hash).toBe('');
+      expect(window.location.href).not.toContain(SECRET);
+      expect(el().innerHTML).not.toContain(SECRET);
+    };
+
+    await arrive(PAIR_URL);
+    expectStripped();
+    expect(draft.peek()).toEqual({ deviceId: DEVICE_ID, secret: SECRET });
+    controller.expectOne('/api/devices').flush([]);
+    expect(text(el().querySelector('[data-device-id]'))).toBe(DEVICE_ID);
+
+    // A second link while the first device is shown replaces it.
+    const other = 'test-device-000000000002';
+    await arrive(`/pair#d=${other}&s=${SECRET}`);
+    expectStripped();
+    controller.expectOne('/api/devices').flush([]);
+    expect(text(el().querySelector('[data-device-id]'))).toBe(other);
+
+    // A malformed link while a device is shown says so and leaves nothing pending.
+    await arrive('/pair#d=short&s=tiny');
+    expectStripped();
+    expect(draft.peek()).toBeNull();
+    expect(el().textContent).toContain('Посилання для підʼєднання неповне. Відскануйте QR-код на екрані авто ще раз.');
+    expect(el().querySelector('input#pair-label')).toBeNull();
+    controller.expectNone('/api/devices');
+  });
+
+  it('a registration answer that lands after a newer link neither clears it nor reports it done', async () => {
+    const { harness, router } = await open(PAIR_URL);
+    const controller = TestBed.inject(HttpTestingController);
+    const el = () => harness.routeNativeElement as HTMLElement;
+    controller.expectOne('/api/devices').flush([]);
+    harness.detectChanges();
+    Array.from(el().querySelectorAll('button')).find((b) => text(b) === 'Підʼєднати')!.click();
+    const first = controller.expectOne((r) => r.method === 'POST' && r.url === '/api/devices');
+
+    const other = 'test-device-000000000002';
+    window.history.pushState(null, '', `/pair#d=${other}&s=${SECRET}`);
+    await router.navigateByUrl(`/pair#d=${other}&s=${SECRET}`);
+    await harness.fixture.whenStable();
+    controller.expectOne((r) => r.method === 'GET' && r.url === '/api/devices').flush([]);
+    first.flush({ deviceId: DEVICE_ID, label: 'Головний блок', createdAt: 1, lastSeenAt: null }, { status: 201, statusText: 'Created' });
+    harness.detectChanges();
+
+    expect(TestBed.inject(PairingDraft).peek()?.deviceId).toBe(other);
+    expect(text(el().querySelector('[data-device-id]'))).toBe(other);
+    expect(el().textContent).not.toContain('Авто підʼєднано.');
   });
 });
 

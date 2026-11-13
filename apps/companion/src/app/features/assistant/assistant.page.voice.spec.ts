@@ -8,10 +8,11 @@ import { SCENARIOS } from '@copilot/vehicle-core';
 import type { ScenarioId, VehicleSnapshot } from '@copilot/vehicle-core';
 import { ApiService } from '../../core/api.service';
 import { AskService } from '../../core/ask.service';
+import { CLOCK } from '../../core/clock';
 import { LiveService } from '../../core/live.service';
 import { SPEECH_RECOGNIZER, SPEECH_SPEAKER } from '../../speech/speech.tokens';
 import type { RecognizerEvent, SpeechRecognizer, SpeechSpeaker } from '../../speech/speech.types';
-import { AssistantPage } from './assistant.page';
+import { AssistantPage, AssistantState, TOPICS } from './assistant.page';
 import { NO_VOICE_TEXT } from './talk.controller';
 import { TALK_TEXT } from './talk.machine';
 import { ScreenWakeLock, WakeLockDocument, WakeLockNavigator } from './wake-lock';
@@ -89,6 +90,7 @@ describe('AssistantPage voice', () => {
         { provide: ApiService, useValue: { dialog: vi.fn(() => of([])) } },
         { provide: SPEECH_RECOGNIZER, useValue: recognizer },
         { provide: SPEECH_SPEAKER, useValue: speaker },
+        { provide: CLOCK, useValue: () => NOW },
       ],
     }).compileComponents();
     const fixture = TestBed.createComponent(AssistantPage);
@@ -340,6 +342,89 @@ describe('AssistantPage voice', () => {
     expect(button(el)).not.toBeNull();
     expect(stateLine(el)).toBe('Натисніть і говоріть');
     expect(field(el)).toBeNull();
+  });
+
+  /*
+   * jsdom has no layout, so this checks the rules that keep the button on screen rather than pixel positions: while
+   * moving the page is exactly as tall as the content area, the controls never shrink, and the exchange card takes
+   * what room is left (never less than its label and first result line) and scrolls inside itself, however long the
+   * answer.
+   */
+  it('while moving a long answer scrolls inside its card and cannot push the button or the state line away', async () => {
+    const long = 'Двигун прогрітий: масло 92 °C, охолоджувальна рідина 88 °C. '.repeat(12).trim();
+    live.snapshot.set(scenario('steady-cruise'));
+    const { el, settle, fixture } = await render();
+    TestBed.inject(AssistantState).turns.set([{ ...TURN, answer: long }]);
+    await settle();
+    const card = el.querySelector<HTMLElement>('.card')!;
+    const talk = el.querySelector<HTMLElement>('.talk')!;
+    expect(el.classList.contains('driving')).toBe(true);
+    expect(getComputedStyle(el).height).toBe('100%');
+    expect(getComputedStyle(card).overflowY).toBe('auto');
+    expect(getComputedStyle(card).minHeight).toBe('114px');
+    expect(getComputedStyle(card).flexShrink).toBe('1');
+    expect(getComputedStyle(talk).flexShrink).toBe('0');
+    expect(getComputedStyle(el.querySelector('.chips')!).flexShrink).toBe('0');
+    // The card stays above the button, as in PhoneTalk.dc.html.
+    expect(card.compareDocumentPosition(talk) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(el.querySelector('[data-answer]')?.textContent).toBe(long);
+
+    live.snapshot.set(scenario('parked'));
+    fixture.detectChanges();
+    await fixture.whenStable();
+    expect(el.classList.contains('driving')).toBe(false);
+    expect(getComputedStyle(card).overflowY).not.toBe('auto');
+  });
+
+  /*
+   * The card may shrink, so while moving it must open on the result rather than on the question: the question gives
+   * way once an answer or an error exists, the card keeps room for its label and one answer line (or the two-line
+   * error), and the chips, last in the page, are what goes below the screen on a small phone.
+   */
+  it('while moving the card opens on the answer or the error, never on the question', async () => {
+    live.snapshot.set(scenario('steady-cruise'));
+    const { el, settle } = await render();
+    await askAloud(el, settle);
+    expect(text(el.querySelector('[data-question]'))).toBe('Як почувається авто?');   // no answer text yet
+
+    answer.send({ type: 'delta', text: 'Двигун прогрітий: масло 92 °C. ' });
+    answer.send({ type: 'sentence', text: 'Двигун прогрітий: масло 92 °C.' });
+    await settle();
+    const card = () => el.querySelector<HTMLElement>('.card')!;
+    expect(el.querySelector('[data-question]')).toBeNull();
+    expect(text(card().firstElementChild)).toBe('COPILOT');
+    expect(card().firstElementChild?.classList).not.toContain('divider');
+    expect(text(el.querySelector('[data-answer]'))).toBe('Двигун прогрітий: масло 92 °C.');
+    // 20 + 16 + 6 + 52 + 20: padding, label, gap, the two-line error (more than one 46 px `answer-driving` line).
+    expect(getComputedStyle(card()).minHeight).toBe('114px');
+
+    answer.send({ type: 'error', error: { code: 'budget-exhausted', message: 'Денний бюджет вичерпано.' } });
+    answer.close();
+    await settle();
+    expect(el.querySelector('[data-question]')).toBeNull();
+    expect(text(card().firstElementChild)).toBe('COPILOT');
+    expect(text(el.querySelector('[data-error]'))).toBe('Денний бюджет вичерпано.');
+
+    // Standing, the full exchange is shown again.
+    live.snapshot.set(scenario('parked'));
+    await settle();
+    expect(text(el.querySelector('[data-question]'))).toBe('Як почувається авто?');
+    expect(card().querySelector('.divider')).not.toBeNull();
+    expect(getComputedStyle(card()).minHeight).not.toBe('114px');
+  });
+
+  it('while moving a chip question that fails shows its error first in the card', async () => {
+    live.snapshot.set(scenario('steady-cruise'));
+    const { el, settle } = await render();
+    chips(el)[0].click();
+    await settle();
+    answer.send({ type: 'error', error: { code: 'budget-exhausted', message: 'Денний бюджет вичерпано.' } });
+    answer.close();
+    await settle();
+    expect(answer.body).toEqual({ text: TOPICS[0], style: 'full', source: 'panel' });
+    expect(el.querySelector('[data-question]')).toBeNull();
+    expect(text(el.querySelector('.card')?.firstElementChild)).toBe('COPILOT');
+    expect(text(el.querySelector('[data-error]'))).toBe('Денний бюджет вичерпано.');
   });
 });
 

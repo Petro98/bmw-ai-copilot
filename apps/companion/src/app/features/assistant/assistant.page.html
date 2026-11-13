@@ -1,12 +1,17 @@
 @if (exchange(); as ex) {
+  <!-- While moving the card may be short (assistant.page.css), so once there is an answer or an error it opens on that
+       result: plan 3 shows the button, the state and the short answer while moving, not the question. -->
+  @let resultOnly = moving() && !!(ex.error || ex.answer);
   <section class="card" [attr.aria-busy]="ask.pending()">
-    <span class="phone-label who">ВИ</span>
-    <p class="question" data-question>{{ ex.question }}</p>
+    @if (!resultOnly) {
+      <span class="phone-label who">ВИ</span>
+      <p class="question" data-question>{{ ex.question }}</p>
+    }
     @if (ex.error) {
-      <span class="phone-label who divider">COPILOT</span>
+      <span class="phone-label who" [class.divider]="!resultOnly">COPILOT</span>
       <p class="error" role="alert" data-error>{{ ex.error }}</p>
     } @else if (ex.answer !== null) {
-      <span class="phone-label who divider">COPILOT</span>
+      <span class="phone-label who" [class.divider]="!resultOnly">COPILOT</span>
       <p class="answer-text" data-answer [class.answer-driving]="moving()" [class.phone-body]="!moving()">{{ ex.answer }}</p>
     }
   </section>

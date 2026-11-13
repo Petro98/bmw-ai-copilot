@@ -32,12 +32,18 @@ export class LiveService {
   private readonly alertsState = signal<AlertEvent[]>([]);
   private readonly statusState = signal<StatusDto | null>(null);
   private readonly connectedState = signal(false);
+  private readonly alertsLoadedState = signal(false);
 
   readonly snapshot = this.snapshotState.asReadonly();
   /** Newest first, at most 50. */
   readonly alerts = this.alertsState.asReadonly();
   readonly status = this.statusState.asReadonly();
   readonly connected = this.connectedState.asReadonly();
+  /**
+   * True once the recent alert list has arrived over REST; an empty list before that means "not loaded", not
+   * "no alerts". It stays true when the stream drops, since the list on screen is still what was loaded.
+   */
+  readonly alertsLoaded = this.alertsLoadedState.asReadonly();
 
   private source: EventSourceLike | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -66,6 +72,21 @@ export class LiveService {
     this.retryMs = FIRST_RETRY_MS;
   }
 
+  /**
+   * Opens the stream again now, with the delay back at 1 s, instead of waiting for the pending retry (after the
+   * owner signs in). Does nothing after `disconnect()`.
+   */
+  reconnectNow(): void {
+    if (!this.wanted) return;
+    if (this.retryTimer !== null) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
+    this.closeSource();
+    this.retryMs = FIRST_RETRY_MS;
+    this.open();
+  }
+
   private open(): void {
     const source = this.createSource(EVENTS_URL);
     this.source = source;
@@ -80,6 +101,9 @@ export class LiveService {
       if (this.source !== source) return;
       this.closeSource();
       this.scheduleReconnect();
+      // EventSource does not expose the HTTP status. The same request through HttpClient does: a 401 there passes
+      // `unauthorizedInterceptor`, which opens «Вхід» like every other 401. Any other failure is ignored.
+      this.api.status().subscribe({ error: () => undefined });
     };
     for (const type of ['snapshot', 'alert', 'status'] as const) {
       source.addEventListener(type, (message) => {
@@ -120,7 +144,13 @@ export class LiveService {
       },
       error: () => undefined,
     });
-    this.api.alerts(MAX_ALERTS).subscribe({ next: (alerts) => this.mergeAlerts(alerts), error: () => undefined });
+    this.api.alerts(MAX_ALERTS).subscribe({
+      next: (alerts) => {
+        this.mergeAlerts(alerts);
+        this.alertsLoadedState.set(true);
+      },
+      error: () => undefined,
+    });
   }
 
   private handle(data: unknown): void {

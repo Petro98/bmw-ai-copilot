@@ -1,6 +1,6 @@
 import { DOCUMENT } from '@angular/common';
 import { HttpClient, HttpErrorResponse } from '@angular/common/http';
-import { Component, Injectable, OnInit, inject, signal } from '@angular/core';
+import { Component, Injectable, effect, inject, signal, untracked } from '@angular/core';
 import { RedirectCommand, Router, type CanActivateFn } from '@angular/router';
 import type { Observable } from 'rxjs';
 import type { DeviceDto, DeviceRegistration } from '@copilot/shared';
@@ -19,6 +19,12 @@ export const PAIR_TEXT = {
   invalid: 'Посилання для підʼєднання неповне. Відскануйте QR-код на екрані авто ще раз.',
   done: 'Авто підʼєднано.',
   failed: 'Не вдалося підʼєднати авто. Спробуйте ще раз.',
+  /**
+   * The car's pairing panel shows only its QR code and two instructions (car/src/ui/draw-pairing.ts,
+   * car/src/ui/strings.uk.ts PAIRING_LINES), not the device id, so the one check the owner can make is that they
+   * have just scanned that code in their own car.
+   */
+  check: 'Головний блок авто просить доступу до Copilot. Підʼєднайте його, лише якщо ви щойно відсканували QR-код на екрані свого авто.',
 } as const;
 
 /** The pairing data in a fragment, or null when it is incomplete or malformed. */
@@ -43,16 +49,23 @@ export function parsePairingFragment(fragment: string): PairingRequest | null {
 export class PairingDraft {
   private pending: PairingRequest | null = null;
   private rejected = false;
+  /**
+   * Counts pairing addresses taken (well-formed or not), so a page already on screen shows a link that arrives
+   * later. It carries no pairing data.
+   */
+  readonly arrivals = signal(0);
 
   keep(request: PairingRequest): void {
     this.pending = request;
     this.rejected = false;
+    this.arrivals.update((n) => n + 1);
   }
 
   /** A pairing address was there but malformed: nothing is pending, and the page says so once. */
   reject(): void {
     this.pending = null;
     this.rejected = true;
+    this.arrivals.update((n) => n + 1);
   }
 
   /** Whether the last pairing address was malformed; reading it resets it. */
@@ -143,7 +156,7 @@ type PairState = 'missing' | 'invalid' | 'ready' | 'saving' | 'done';
   templateUrl: './pair.page.html',
   styleUrl: './pair.page.css',
 })
-export class PairPage implements OnInit {
+export class PairPage {
   private readonly api = inject(DeviceApi);
   private readonly draft = inject(PairingDraft);
   private readonly document = inject(DOCUMENT);
@@ -155,11 +168,22 @@ export class PairPage implements OnInit {
   protected readonly deviceId = signal<string | null>(null);
   protected readonly error = signal<string | null>(null);
 
-  ngOnInit(): void {
+  constructor() {
     // Through the Router, pairingFragmentGuard has already taken the fragment; this covers the page shown without it.
     const fragment = this.document.location?.hash ?? '';
     if (fragment !== '' && fragment !== '#') takePairingFragment(fragment, this.draft, this.document);
+    // What is pending now, and every pairing address that arrives while the page is on screen (the `pair` route runs
+    // its guard again for a fragment-only navigation, which reuses this page).
+    effect(() => {
+      this.draft.arrivals();
+      untracked(() => this.show());
+    });
+  }
+
+  private show(): void {
+    this.error.set(null);
     if (this.draft.takeRejected()) {
+      this.deviceId.set(null);
       this.state.set('invalid');
       return;
     }
@@ -178,11 +202,14 @@ export class PairPage implements OnInit {
     this.state.set('saving');
     this.error.set(null);
     this.api.register({ deviceId: pending.deviceId, secret: pending.secret, label: field.value.trim() }).subscribe({
+      // An answer that lands after a newer pairing address arrived belongs to a device no longer on screen.
       next: () => {
+        if (this.draft.peek() !== pending) return;
         this.draft.clear();
         this.state.set('done');
       },
       error: (error: unknown) => {
+        if (this.draft.peek() !== pending) return;
         this.state.set('ready');
         this.error.set(errorMessage(error, PAIR_TEXT.failed));
       },

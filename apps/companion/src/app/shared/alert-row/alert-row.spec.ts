@@ -53,6 +53,31 @@ describe('AlertRow', () => {
     expect(tagLine(el)).toBe('ПОПЕРЕДЖЕННЯ · ВАШ ЛІМІТ · 9 ЛИСТОПАДА');
   });
 
+  it('says in words that an alert was cleared and when, as the head-unit screen does', async () => {
+    const el = await render(alert({ active: false, clearedAt: new Date(2026, 10, 13, 12, 39).getTime() }));
+    expect(tagLine(el)).toBe('ПОПЕРЕДЖЕННЯ · BMW CHECK CONTROL · ЗНЯТО О 12:39');
+    expect(el.getAttribute('data-active')).toBe('false');
+    expect(el.querySelector('svg[data-shape="triangle"]')).not.toBeNull();
+
+    TestBed.resetTestingModule();
+    const yesterday = await render(alert({ active: false, clearedAt: new Date(2026, 10, 12, 20, 0).getTime() }));
+    expect(tagLine(yesterday)).toBe('ПОПЕРЕДЖЕННЯ · BMW CHECK CONTROL · ЗНЯТО ВЧОРА');
+
+    TestBed.resetTestingModule();
+    const earlier = await render(alert({ active: false, clearedAt: new Date(2026, 10, 9, 8, 0).getTime() }));
+    expect(tagLine(earlier)).toBe('ПОПЕРЕДЖЕННЯ · BMW CHECK CONTROL · ЗНЯТО 9 ЛИСТОПАДА');
+
+    TestBed.resetTestingModule();
+    const unknown = await render(alert({ active: false, clearedAt: null }));
+    expect(tagLine(unknown)).toBe('ПОПЕРЕДЖЕННЯ · BMW CHECK CONTROL · ЗНЯТО');
+  });
+
+  it('marks an active alert as active and keeps its time of raise', async () => {
+    const el = await render(alert());
+    expect(el.getAttribute('data-active')).toBe('true');
+    expect(tagLine(el)).not.toContain('ЗНЯТО');
+  });
+
   it('formats event times as a clock time today, «ВЧОРА», or a date', () => {
     expect(eventTime(new Date(2026, 10, 13, 0, 5).getTime(), NOW)).toBe('00:05');
     expect(eventTime(new Date(2026, 10, 12, 23, 59).getTime(), NOW)).toBe('ВЧОРА');

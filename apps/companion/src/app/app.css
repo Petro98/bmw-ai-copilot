@@ -27,25 +27,35 @@
   padding: 0 20px;
 }
 
+/* The screen's name is the page's one level-1 heading; the screens' own sections start at level 2. */
+.title {
+  margin: 0;
+}
+
 .marks {
   display: flex;
   align-items: center;
   gap: 14px;
-  color: var(--ink-dim);
 }
 
-.mark {
+/* Simulated vehicle data: a persistent strip under the top bar, a word and one line, never colour alone. */
+.demo {
+  flex-shrink: 0;
   display: flex;
-  align-items: center;
-  gap: var(--space-1);
-}
-
-.mark-icon.on {
-  color: var(--signal);
-}
-
-.mark-icon.off {
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: var(--space-2);
+  margin: 0 var(--space-3) var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-md);
   color: var(--ink-dim);
+  font-size: 13px;
+  line-height: 16px;
+}
+
+.demo-label {
+  color: var(--ink);
 }
 
 .content {
@@ -74,12 +84,16 @@
   font-size: 13px;
   line-height: 16px;
   font-weight: 500;
+  border-top: 2px solid transparent;
 }
 
 .tab:hover {
   color: var(--ink);
 }
 
+/* The current section: `signal`, and also a bar above it and heavier words, so it is never told by colour alone. */
 .tab.active {
   color: var(--signal);
+  border-top-color: var(--signal);
+  font-weight: 700;
 }

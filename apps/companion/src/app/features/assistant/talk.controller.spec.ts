@@ -266,7 +266,7 @@ describe('TalkController', () => {
     askAloud();
     await flush();
     expect(talk.model().state).toBe('idle');
-    expect(talk.model().message).toBe('Не вдалося отримати відповідь. Перевірте з\'єднання і спробуйте ще раз.');
+    expect(talk.model().message).toBe('Не вдалося отримати відповідь. Перевірте зʼєднання і спробуйте ще раз.');
   });
 
   it('without a Ukrainian voice the answer is shown, not spoken, and the note appears', async () => {

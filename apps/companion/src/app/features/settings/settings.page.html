@@ -35,7 +35,7 @@
   <div class="list">
     <label class="row switch" for="popups">Вікна на екрані авто<input id="popups" type="checkbox"
       [checked]="settings()?.popupsEnabled === true" [disabled]="!settings() || saving()" (change)="setPopups($event)"></label>
-    <label class="row switch" for="diagnostics"><span class="stack">Читання пам'яті помилок<span class="hint">Вимкнено, доки ви не погодите перевірку в авто</span></span><input
+    <label class="row switch" for="diagnostics"><span class="stack">Читання памʼяті помилок<span class="hint">Вимкнено, доки ви не погодите перевірку в авто</span></span><input
       id="diagnostics" type="checkbox" disabled [checked]="settings()?.diagnosticsEnabled === true"></label>
   </div>
   @if (switchError(); as error) {
@@ -54,7 +54,14 @@
           <li class="row" [attr.data-device]="device.deviceId">
             <span class="stack">{{ device.label }}<span class="hint">Підʼєднано {{ formatDateTime(device.createdAt) }} · {{
               device.lastSeenAt === null ? 'ще не виходив на звʼязок' : 'на звʼязку ' + formatDateTime(device.lastSeenAt) }}</span></span>
-            <button type="button" class="secondary" [disabled]="removing() !== null" (click)="unpair(device)">Відʼєднати</button>
+            @if (confirming() === device.deviceId) {
+              <span class="confirm">
+                <button type="button" class="secondary" [disabled]="removing() !== null" (click)="unpair(device)">Підтвердити відʼєднання</button>
+                <button type="button" class="secondary" (click)="cancelUnpair()">Скасувати</button>
+              </span>
+            } @else {
+              <button type="button" class="secondary" [disabled]="removing() !== null" (click)="askUnpair(device)">Відʼєднати</button>
+            }
           </li>
         }
       </ul>
@@ -94,3 +101,12 @@
     }
   </section>
 }
+
+<div class="block">
+  <div class="list">
+    <button type="button" class="row" data-sign-out [disabled]="signingOut()" (click)="signOut()">Вийти</button>
+  </div>
+  @if (signOutError(); as error) {
+    <p class="message" role="alert" data-sign-out-error>{{ error }}</p>
+  }
+</div>

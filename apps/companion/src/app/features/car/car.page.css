@@ -18,6 +18,13 @@
   color: var(--ink-dim);
 }
 
+.note {
+  margin: 0;
+  font-size: 17px;
+  line-height: 26px;
+  color: var(--ink);
+}
+
 .tiles {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

@@ -7,15 +7,16 @@ import { SCENARIOS } from '@copilot/vehicle-core';
 import type { ScenarioId, VehicleSnapshot } from '@copilot/vehicle-core';
 import { ApiService } from '../../core/api.service';
 import { AskService } from '../../core/ask.service';
+import { CLOCK } from '../../core/clock';
 import { LiveService } from '../../core/live.service';
 import { AssistantPage, TOPICS } from './assistant.page';
 
 const NOW = new Date(2026, 10, 13, 12, 41).getTime();
 
-function scenario(id: ScenarioId): VehicleSnapshot {
+function scenario(id: ScenarioId, at = NOW): VehicleSnapshot {
   const found = SCENARIOS.find((s) => s.id === id);
   if (!found) throw new Error(`no scenario ${id}`);
-  return found.build(0, NOW);
+  return found.build(0, at);
 }
 
 function turn(n: number): DialogTurn {
@@ -38,6 +39,7 @@ describe('AssistantPage', () => {
   let live: { snapshot: ReturnType<typeof signal<VehicleSnapshot | null>> };
   let api: { dialog: ReturnType<typeof vi.fn> };
   let ask: FakeAskService;
+  let clock: number;
 
   async function render(): Promise<{
     el: HTMLElement; update: () => Promise<void>; fixture: ComponentFixture<AssistantPage>;
@@ -48,6 +50,7 @@ describe('AssistantPage', () => {
         { provide: LiveService, useValue: live },
         { provide: ApiService, useValue: api },
         { provide: AskService, useValue: ask },
+        { provide: CLOCK, useValue: () => clock },
       ],
     }).compileComponents();
     const fixture = TestBed.createComponent(AssistantPage);
@@ -62,6 +65,7 @@ describe('AssistantPage', () => {
   const text = (node: Element | null | undefined) => node?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
 
   beforeEach(() => {
+    clock = NOW;
     live = { snapshot: signal<VehicleSnapshot | null>(scenario('parked')) };
     api = { dialog: vi.fn(() => of([])) };
     ask = new FakeAskService();
@@ -195,6 +199,39 @@ describe('AssistantPage', () => {
     expect(chips(el).map((c) => text(c))).toEqual(TOPICS.slice(0, 3));
     expect(el.querySelector('details')).toBeNull();
     expect(el.querySelector('[data-answer]')?.classList).toContain('answer-driving');
+  });
+
+  it('a speed older than two minutes does not count as moving: the car went quiet, the full layout stays', async () => {
+    api.dialog.mockReturnValue(of([turn(1), turn(2)]));
+    live.snapshot.set(scenario('steady-cruise', NOW - 10 * 60 * 60_000));
+    const { el } = await render();
+    expect(field(el)).not.toBeNull();
+    expect(chips(el).length).toBe(6);
+    expect(el.querySelector('details')).not.toBeNull();
+    expect(el.querySelector('[data-answer]')?.classList).not.toContain('answer-driving');
+  });
+
+  it('leaves the driving layout as the last speed ages, with no new snapshot', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      live.snapshot.set(scenario('steady-cruise'));
+      const { el, update } = await render();
+      expect(field(el)).toBeNull();
+      expect(chips(el).length).toBe(3);
+
+      clock = NOW + 2 * 60_000;
+      vi.advanceTimersByTime(60_000);
+      await update();
+      expect(field(el)).toBeNull();
+
+      clock = NOW + 2 * 60_000 + 10_000;
+      vi.advanceTimersByTime(10_000);
+      await update();
+      expect(field(el)).not.toBeNull();
+      expect(chips(el).length).toBe(6);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('counts characters from 400 and stops at 500', async () => {

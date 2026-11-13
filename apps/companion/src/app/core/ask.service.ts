@@ -1,11 +1,11 @@
 import { Injectable, inject, signal } from '@angular/core';
 import { Router } from '@angular/router';
 import type { ApiError, AskRequest, AskSource, AskStreamEvent, AskStyle, DialogTurn } from '@copilot/shared';
-import { LOGIN_PATH, safeReturnUrl } from '../features/login/login.page';
+import { goToLogin } from '../features/login/login.page';
 import { parseSse } from './sse-parser';
 
 /** Shown when no answer and no server message arrived (network down, stream cut off). */
-export const ASK_FAILED_MESSAGE = 'Не вдалося отримати відповідь. Перевірте з\'єднання і спробуйте ще раз.';
+export const ASK_FAILED_MESSAGE = 'Не вдалося отримати відповідь. Перевірте зʼєднання і спробуйте ще раз.';
 
 export interface AskOptions {
   /** Who asks: the typed panel (default) or the voice flow. */
@@ -49,7 +49,7 @@ export class AskService {
       });
       if (response.status === 401) {
         // The session has expired: «Вхід», as the HttpClient interceptor does; no error is left on screen.
-        if (this.controller === controller) this.toLogin();
+        if (this.controller === controller) goToLogin(this.router);
         return null;
       }
       const outcome = response.ok && response.body
@@ -78,13 +78,6 @@ export class AskService {
     controller.abort();
     this.pendingState.set(false);
     this.partialState.set('');
-  }
-
-  /** Same destination and return address as `unauthorizedInterceptor` (features/login/login.page.ts). */
-  private toLogin(): void {
-    const current = this.router.url.split('#')[0];
-    if (current.startsWith(LOGIN_PATH)) return;
-    void this.router.navigate([LOGIN_PATH], { queryParams: { return: safeReturnUrl(current) } });
   }
 
   private async readStream(
