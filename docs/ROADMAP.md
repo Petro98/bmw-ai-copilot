@@ -94,3 +94,39 @@ for our code.
 
 Revisited only on the owner's explicit request: sound from the head unit itself, head-up display
 or cluster output, a root tool on the head unit.
+
+## Future ideas
+
+Recorded on 2026-11-13 from a discussion with the owner. Nothing here is planned or approved yet;
+each item needs its own plan, and the access levels below need the owner's explicit decision.
+
+### Features that need no new access
+
+They work on data the app already collects.
+
+| Idea | What the owner gets |
+|---|---|
+| Check Control explainer | When a message appears, one tap asks what it means and whether it is safe to drive on. |
+| Trip journal | After each drive a short summary: distance, consumption, highest temperatures, alerts. |
+| Fuel accounting | Consumption per trip and per month, refuelling detected from a jump in fuel level, cost per kilometre from a price the owner enters. |
+| Slow puncture detection | One tyre losing pressure faster than the others over several days, reported before the car's own warning. An owner-configured rule, like the existing limits. |
+| 12 V battery trend | How the charge level changes over weeks, especially before winter. |
+| Service log | The car's service intervals plus the owner's own notes about work done at the service station; a report before a visit. |
+| Charts | Warm-up curve, temperatures over a trip, tyre pressure over a month. |
+| Photo from the phone | A photo of an unfamiliar indicator, explained by Claude. |
+| Owner's manual | The owner uploads the manual as a PDF and the assistant answers from it. |
+
+Suggested first: Check Control explainer, trip journal, fuel accounting.
+
+### More access to the car, by level
+
+| Level | What it would give | Risk | Position |
+|---|---|---|---|
+| 1. More passive signals | Everything the head unit already receives. Which signals exist on this firmware is known only from the unit's own interface catalogue. | Practically none. | Yes, after the first car check. Signals are added to the catalogue only with a cited source. |
+| 2. Diagnostic reads | Stored fault codes, intake temperature, boost pressure, real 12 V voltage. | Every request keeps the car awake and loads the bus. | Yes, only on demand, with the ignition on, after the owner's separate approval (open decision 7). The read-only gate is written and ships disabled. |
+| 3. Comfort functions | For example cabin ambient lighting; open-source apps for this platform have done it. | Behaviour depends on the firmware; glitches are possible. | Possibly, as a separate phase. It would change the project's read-only rule, so it needs the owner's explicit decision. Every action is started by the owner with a button; Claude never triggers one. |
+| 4. Coding, writes to control units, clearing faults | Hidden features, actuator tests. | A control unit can be disabled; warranty. | No. Dedicated tools exist for this. |
+| 5. Brakes, steering, engine, transmission, door locks | — | A mistake is a crash. | No. A language model can be wrong, and the head unit is deliberately separated from the driving systems. |
+
+Order suggested to the owner: finish the current plans and the car check, then the three features
+above, then levels 1 and 2 once the car check shows what this firmware actually delivers.
