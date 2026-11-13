@@ -59,7 +59,8 @@ iDrive Monitor app, which is not here).
 
 ## Local changes
 
-All in `tools/build.py`, each marked in the source with `[car/kit local edit N]`:
+Edits 1-3 are in `tools/build.py`, edit 4 in `runtime/signals.js`; each is marked in the source with
+`[car/kit local edit N]`:
 
 1. `--preview-only`: stages the app without BMW's `oap-sdk` and stops before the installable archives, for the
    offline preview; without the flag a missing `oap-sdk` stops the build with a message. Ported from idrive7-apps
@@ -68,6 +69,12 @@ All in `tools/build.py`, each marked in the source with `[car/kit local edit N]`
    internet through mgu-uplink only then: mgu-store `docs/PUBLISHING.md`, "Internet"). Two lines.
 3. `LICENSE.mgu-apps` is packed into every package as `LICENSE.kit-mgu-apps`, beside `LICENSE.kit`, so the vendor's
    notice travels with the code.
+4. `runtime/signals.js` `watch()` (lines 60-70 and 88): a polled watch (`opts.pollMs`) could not be stopped. Upstream
+   calls `setInterval` without keeping the handle, and `res.shutdown` neither clears it nor resets `res.available`,
+   so after a shutdown the interval kept firing for the life of the process (a timer while the car is parked, which
+   spec §9 forbids, and one more for every start of the provider). Now the handle is kept in `pollTimer`;
+   `res.shutdown` clears it, sets `res.available = false`, and shuts the proxy down only on its first call, so
+   shutting down twice is harmless. Tested with a fake native binding in `car/src/provider/kit-signals.test.ts`.
 
 ## What the kit does that matters for this project (read before the first run)
 
@@ -85,7 +92,8 @@ The kit was read before any of it ran here. Things it does beyond drawing:
 - `runtime/renderd.js`: connects to the GPU renderer's local Unix socket (`/run/mgu-renderd/renderd.sock`,
   `/run/mgu-render/render.sock`) when one exists; no network.
 - `runtime/display.js`: without a renderer socket it checks for one every 5 s; after the first frame it keeps a
-  500 ms keep-alive interval (unref'd). `signals.watch` with `pollMs` starts an interval that is never cleared.
+  500 ms keep-alive interval (unref'd). `signals.watch` with `pollMs` starts an interval that the watch's
+  `shutdown()` clears (local edit 4; upstream never clears it).
 - `runtime/mgu.js`: writes a rotating log file in the app's data folder, removes its own old frame files from
   `rhmiData/resources`, and exits the process when MainApp asks it to shut down or on an uncaught exception.
 - `tools/oapgen/gen.js` (runs on the head unit at install time, never here) loads BMW's generator modules from the

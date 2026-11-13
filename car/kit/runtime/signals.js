@@ -57,7 +57,17 @@ async function watch(iface, instance, handlers, log, opts) {
         const cfg = loadConfig(iface);
         const p = await nativeTick(() => someip.buildProxy(cfg, String(instance)).then((px) => px.init().then(() => px)));
         res.proxy = p;
-        res.shutdown = () => Promise.resolve().then(() => p.shutdown && p.shutdown()).catch(() => {});
+        // [car/kit local edit 4] keep the poll interval's handle; shutdown clears it, marks the watch
+        // unavailable and shuts the proxy down once (a second call does nothing).
+        let pollTimer = null;
+        let down = false;
+        res.shutdown = () => {
+            if (pollTimer !== null) { clearInterval(pollTimer); pollTimer = null; }
+            res.available = false;
+            if (down) return Promise.resolve();
+            down = true;
+            return Promise.resolve().then(() => p.shutdown && p.shutdown()).catch(() => {});
+        };
         const fields = Object.keys(handlers || {});
         const fetchAll = () => fields.forEach((f) => {
             if (cfg.fields && cfg.fields[f] && cfg.fields[f].getter) {
@@ -75,7 +85,7 @@ async function watch(iface, instance, handlers, log, opts) {
             }
         }
         if (p.isAvailable && p.isAvailable()) { res.available = true; fetchAll(); }
-        if (opts && opts.pollMs) setInterval(() => { if (res.available) setImmediate(fetchAll); }, opts.pollMs);
+        if (opts && opts.pollMs) pollTimer = setInterval(() => { if (res.available) setImmediate(fetchAll); }, opts.pollMs);   // [car/kit local edit 4]
     } catch (e) {
         res.error = String(e);
         if (log) log.warn('signals ' + iface + ': ' + e);

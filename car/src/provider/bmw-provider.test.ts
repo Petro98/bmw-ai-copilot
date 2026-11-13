@@ -19,26 +19,50 @@ const TPMS = 'de.bmw.infotainment.vehicle.TPMS';
 const CDS = 'de.bmw.infotainment.vehicle.CDS';
 const V2 = 'de.bmw.infotainment.vehicle.Vehicle2';
 const CONDITION = 'de.bmw.infrastructure.VehicleCondition';
+const CCM = 'de.bmw.infotainment.checkcontrol.CheckControlMaster';
+const KOMBI2 = 'de.bmw.infotainment.KombiInterface_2';
+
+const NOT_REPORTED = { available: false, reason: 'not-reported' };
+const STALE = { available: false, reason: 'stale' };
+/** the passive fields a car notifies only when they change (the fixture sends each once) */
+const STEADY_KEYS = ['coolantTemp', 'oilTemp', 'battery12vCharge', 'gear', 'gearStage', 'driveMode', 'condition'] as const;
 
 interface WatchCall { iface: string; instance: string | undefined; fields: string[]; opts: { pollMs?: number } | undefined }
 
-/** A stand-in for the kit's signals.watch: records the calls and lets the test play the car. */
+interface FakeWatch { iface: string; polled: boolean; available: boolean; down: boolean }
+
+/**
+ * A stand-in for the kit's signals.watch: records the calls and lets the test play the car. Like the kit
+ * (car/kit/runtime/signals.js, local edit 4) a shut-down watch reports available false.
+ */
 function fakeSignals() {
   const calls: WatchCall[] = [];
   const handlers: Record<string, Record<string, (value: unknown) => void>> = {};
+  const watches: FakeWatch[] = [];
   let shutdowns = 0;
   const signals: SignalsApi = {
     watch(iface, instance, h, _log, opts) {
       calls.push({ iface, instance, fields: Object.keys(h), opts });
       handlers[iface] = h;
-      return Promise.resolve({ iface, available: true, error: null, shutdown: () => { shutdowns++; return Promise.resolve(); } });
+      const w = { iface, polled: !!(opts && opts.pollMs), available: true, down: false, error: null,
+        shutdown: () => { shutdowns++; w.down = true; w.available = false; return Promise.resolve(); } };
+      watches.push(w);
+      return Promise.resolve(w);
     },
   };
   const send = (iface: string, field: string, value: unknown): void => {
     const h = handlers[iface];
     if (h && h[field]) h[field](value);
   };
-  return { signals, calls, send, shutdowns: () => shutdowns };
+  const live = () => watches.filter((w) => !w.down);
+  /** the live watch the provider holds for an interface */
+  const watchOf = (iface: string) => live().find((w) => w.iface === iface);
+  return { signals, calls, send, shutdowns: () => shutdowns, live, watchOf };
+}
+
+/** lets promise chains (watch set-up, shutdowns, a deferred refresh) run */
+async function flush(rounds = 5): Promise<void> {
+  for (let i = 0; i < rounds; i++) await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
 /**
@@ -289,6 +313,233 @@ describe('BmwMguVehicleDataProvider', () => {
     for (const [iface, field] of fixture.feed)
       for (const junk of [null, undefined, 42, 'x', {}, []]) expect(() => car.send(iface, field, junk)).not.toThrow();
     expect(() => provider.refresh()).not.toThrow();
+  });
+
+  test('a Check Control message does not survive a stop/start: nothing until the car sends its list again', async () => {
+    const { car, provider, clock } = await started();
+    car.send(KOMBI2, 'ccList', [{ cCIdentifer: 901, cCShortName: 'Synthetic message one', cCColor: 'YELLOW' }]);
+    car.send(CCM, 'basicList', [{ ccmId: 901, activeState: 'AKTIV' }]);
+    car.send(KOMBI2, 'cbsDataServiceList', fixture.feed.find((e) => e[1] === 'cbsDataServiceList')![2]);
+    clock.advance(1000);
+    expect(provider.refresh().checkControl).toMatchObject({ available: true, value: [{ id: 901, text: 'Synthetic message one' }] });
+    expect(provider.snapshot().serviceItems).toMatchObject({ available: true });
+    await provider.stop();
+    await provider.start();
+    clock.advance(1000);
+    let s = provider.refresh();
+    expect(s.checkControl).toEqual(NOT_REPORTED);
+    expect(s.serviceItems).toEqual(NOT_REPORTED);
+    car.send(KOMBI2, 'ccList', [{ cCIdentifer: 901, cCShortName: 'Synthetic message one' }]);   // a text alone is not the list
+    expect(provider.refresh().checkControl).toEqual(NOT_REPORTED);
+    car.send(CCM, 'basicList', []);                    // the car's list, without the message it cleared meanwhile
+    s = provider.refresh();
+    expect(s.checkControl).toMatchObject({ available: true, value: [] });
+  });
+
+  test('values from before a stop do not come back as current after the next start', async () => {
+    const { car, provider, clock } = await started();
+    playFixture(car.send);
+    clock.advance(1000);
+    provider.refresh();
+    await provider.stop();
+    await provider.start();
+    car.send(CDS, 'statusEngineSpeed2', { actualValueRPMEngineCrankshaft: 3200 });
+    clock.advance(1000);
+    const s = provider.refresh();
+    expect(s.engineRpm).toMatchObject({ available: true, value: 800 });
+    expect(s.coolantTemp).toEqual(NOT_REPORTED);
+    expect(s.condition).toEqual(NOT_REPORTED);
+  });
+
+  test('a steady ten-minute drive keeps fields that only notify on change available', async () => {
+    const { car, provider, clock } = await started();
+    playFixture(car.send);
+    for (let second = 1; second <= 600; second++) {
+      clock.advance(1000);
+      car.send(CDS, 'statusEngineSpeed2', { actualValueRPMEngineCrankshaft: 7000 + (second % 40) * 4 });
+      car.send(V2, 'statusCarSpeed2', { speedVehicleCentreOfGravity: 6000 + (second % 30) * 16 });
+      const s = provider.refresh();
+      for (const key of STEADY_KEYS) expect(s[key]).toMatchObject({ available: true, at: clock.now() });
+    }
+    const s = provider.snapshot();
+    expect(s.coolantTemp).toMatchObject({ value: 88 });
+    expect(s.battery12vCharge).toMatchObject({ value: 84 });
+    expect(s.gear).toMatchObject({ value: 'D4' });
+    expect(s.driveMode).toMatchObject({ value: 'Sport' });
+    expect(s.condition).toMatchObject({ value: 'driving' });
+    // a polled reading is judged by its own last poll result (this fake never polls); the odometer is exempt
+    expect(s.fuelLevel).toEqual(STALE);
+    expect(s.tyrePressure.frontLeft).toEqual(STALE);
+    expect(s.odometer).toMatchObject({ available: true, value: 23817 });
+  });
+
+  test('when the whole car goes quiet for longer than the window the steady fields turn stale', async () => {
+    const { car, provider, clock } = await started();
+    playFixture(car.send);
+    clock.advance(120_000);
+    car.send(CDS, 'statusEngineSpeed2', { actualValueRPMEngineCrankshaft: 3200 });
+    provider.refresh();
+    clock.advance(300_000);
+    let s = provider.refresh();
+    for (const key of STEADY_KEYS) expect(s[key]).toMatchObject({ available: true });
+    clock.advance(1);
+    s = provider.refresh();
+    for (const key of STEADY_KEYS) expect(s[key]).toEqual(STALE);
+    expect(s.engineRpm).toEqual(STALE);
+    expect(s.speed).toEqual(STALE);
+  });
+
+  test('after a forward clock jump one notification brings the steady fields back', async () => {
+    const { car, provider, clock } = await started();
+    playFixture(car.send);
+    clock.advance(1000);
+    provider.refresh();
+    clock.advance(3_600_000);
+    let s = provider.refresh();
+    for (const key of STEADY_KEYS) expect(s[key]).toEqual(STALE);
+    car.send(V2, 'statusCarSpeed2', { speedVehicleCentreOfGravity: 6400 });
+    s = provider.refresh();
+    for (const key of STEADY_KEYS) expect(s[key]).toMatchObject({ available: true, at: clock.now() });
+    expect(s.coolantTemp).toMatchObject({ value: 88 });
+  });
+
+  test('after a backward clock jump no reading is dated in the future and quiet still ages', async () => {
+    const { car, provider, clock } = await started();
+    playFixture(car.send);
+    clock.advance(-600_000);
+    let s: VehicleSnapshot;
+    expect(() => { s = provider.refresh(); }).not.toThrow();
+    s = provider.snapshot();
+    const readings: Array<{ available: boolean; at?: number }> = [];
+    for (const key of Object.keys(s)) {
+      const v = (s as unknown as Record<string, unknown>)[key] as Record<string, unknown>;
+      if (key === 'takenAt') continue;
+      if ('available' in v) readings.push(v as { available: boolean; at?: number });
+      else for (const wheel of Object.keys(v)) readings.push(v[wheel] as { available: boolean; at?: number });
+    }
+    for (const r of readings) if (r.available) expect(r.at).toBeLessThanOrEqual(clock.now());
+    expect(s.coolantTemp).toMatchObject({ available: true, at: clock.now() });
+    clock.advance(300_001);
+    expect(provider.refresh().coolantTemp).toEqual(STALE);   // not frozen fresh until the old time comes round
+  });
+
+  test('a reading whose interface reports unavailable is unavailable at once and stays so until it arrives again', async () => {
+    const { car, provider, clock } = await started();
+    playFixture(car.send);
+    clock.advance(1000);
+    provider.refresh();
+    car.watchOf(CDS)!.available = false;
+    car.send(V2, 'statusCarSpeed2', { speedVehicleCentreOfGravity: 6400 });   // the rest of the car still notifies
+    clock.advance(1000);
+    let s = provider.refresh();
+    expect(s.engineRpm).toEqual(NOT_REPORTED);
+    expect(s.coolantTemp).toEqual(NOT_REPORTED);
+    expect(s.battery12vCharge).toEqual(NOT_REPORTED);
+    expect(s.speed).toMatchObject({ available: true, value: 100 });
+    car.watchOf(CDS)!.available = true;
+    clock.advance(1000);
+    expect(provider.refresh().coolantTemp).toEqual(NOT_REPORTED);   // the old value does not come back
+    car.send(CDS, 'statusEngineTemperature', { temperatureEngineDrive: 136, temperatureEngineOilDrive: 140 });
+    s = provider.refresh();
+    expect(s.coolantTemp).toMatchObject({ available: true, value: 88 });
+  });
+
+  test('a watch that never said it was available (an older native binding) does not hide its values', async () => {
+    const { car, provider, clock } = await started();
+    car.watchOf(CDS)!.available = false;
+    car.send(CDS, 'statusEngineSpeed2', { actualValueRPMEngineCrankshaft: 3200 });
+    clock.advance(1000);
+    expect(provider.refresh().engineRpm).toMatchObject({ available: true, value: 800 });
+  });
+
+  test('suspend() keeps only the vehicle-condition watch, no polled watch, and marks the rest not-reported', async () => {
+    const { car, provider, clock } = await started();
+    playFixture(car.send);
+    clock.advance(1000);
+    provider.refresh();
+    provider.suspend();
+    await flush();
+    expect(car.live().map((w) => w.iface)).toEqual([CONDITION]);
+    expect(car.live().filter((w) => w.polled)).toEqual([]);
+    let s = provider.snapshot();
+    expect(s.condition).toMatchObject({ available: true, value: 'driving' });
+    for (const key of ['engineRpm', 'speed', 'coolantTemp', 'gear', 'driveMode', 'fuelLevel', 'odometer', 'checkControl', 'serviceItems'] as const)
+      expect(s[key]).toEqual(NOT_REPORTED);
+    expect(s.tyrePressure.frontLeft).toEqual(NOT_REPORTED);
+    expect(s.faultCodes).toEqual({ available: false, reason: 'diagnostics-disabled' });
+    // values through the handlers of the watches that were shut down are dropped
+    car.send(CDS, 'statusEngineSpeed2', { actualValueRPMEngineCrankshaft: 3200 });
+    clock.advance(1000);
+    s = provider.refresh();
+    expect(s.engineRpm).toEqual(NOT_REPORTED);
+  });
+
+  test('a condition change while suspended reaches onChange without a tick', async () => {
+    const { car, provider } = await started();
+    car.send(CONDITION, 'VehicleCondition', { statusConditionVehicle: 'FAHREN' });
+    provider.refresh();
+    provider.suspend();
+    const seen: VehicleSnapshot['condition'][] = [];
+    provider.onChange((s) => seen.push(s.condition));
+    car.send(CONDITION, 'VehicleCondition', { statusConditionVehicle: 2 });
+    expect(seen.length).toBe(0);                       // not from inside the signal handler
+    await flush();
+    expect(seen.length).toBe(1);
+    expect(seen[0]).toMatchObject({ available: true, value: 'parked' });
+    car.send(CONDITION, 'VehicleCondition', { statusConditionVehicle: 5 });
+    car.send(CONDITION, 'VehicleCondition', { statusConditionVehicle: 7 });
+    await flush();
+    expect(seen.length).toBe(2);                       // a burst is one notification
+    expect(seen[1]).toMatchObject({ value: 'ignition-on' });
+  });
+
+  test('resume() re-creates the other watches and resets Check Control; it does nothing unless suspended', async () => {
+    const { car, provider, clock } = await started();
+    car.send(CCM, 'basicList', [{ ccmId: 901, activeState: 'AKTIV' }]);
+    provider.refresh();
+    provider.resume();
+    await flush();
+    expect(car.calls.length).toBe(RAW_INTERFACES.length);
+    provider.suspend();
+    provider.suspend();
+    await flush();
+    expect(car.live().length).toBe(1);
+    provider.resume();
+    await flush();
+    expect(car.calls.length).toBe(2 * RAW_INTERFACES.length - 1);
+    expect(car.live().length).toBe(RAW_INTERFACES.length);
+    for (const raw of RAW_INTERFACES) expect(car.live().filter((w) => w.iface === raw.iface).length).toBe(1);
+    clock.advance(1000);
+    expect(provider.refresh().checkControl).toEqual(NOT_REPORTED);
+    car.send(CCM, 'basicList', []);
+    car.send(CDS, 'statusEngineSpeed2', { actualValueRPMEngineCrankshaft: 3200 });
+    const s = provider.refresh();
+    expect(s.checkControl).toMatchObject({ available: true, value: [] });
+    expect(s.engineRpm).toMatchObject({ available: true, value: 800 });
+  });
+
+  test('suspend/resume repeated 50 times leaves a constant number of live watches', async () => {
+    const { car, provider } = await started();
+    for (let i = 0; i < 50; i++) { provider.suspend(); provider.resume(); }
+    await flush();
+    expect(car.live().length).toBe(RAW_INTERFACES.length);
+    for (let i = 0; i < 50; i++) {
+      provider.suspend();
+      await flush();
+      expect(car.live().length).toBe(1);
+      provider.resume();
+      await flush();
+      expect(car.live().length).toBe(RAW_INTERFACES.length);
+    }
+    for (const raw of RAW_INTERFACES) expect(car.live().filter((w) => w.iface === raw.iface).length).toBe(1);
+    provider.suspend();
+    await provider.stop();
+    await flush();
+    expect(car.live().length).toBe(0);
+    provider.suspend();                                // stopped: nothing to suspend
+    provider.resume();
+    await flush();
+    expect(car.live().length).toBe(0);
   });
 
   test('every signal in app.json has only read/subscribe flags', () => {
