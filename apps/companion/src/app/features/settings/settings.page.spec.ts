@@ -2,10 +2,11 @@ import { HttpErrorResponse } from '@angular/common/http';
 import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { of, throwError } from 'rxjs';
-import type { ScenarioDto, SettingsDto, StatusDto } from '@copilot/shared';
+import type { DeviceDto, ScenarioDto, SettingsDto, StatusDto } from '@copilot/shared';
 import { ApiService } from '../../core/api.service';
 import { LiveService } from '../../core/live.service';
-import { SettingsPage } from './settings.page';
+import { DeviceApi } from '../pair/pair.page';
+import { SettingsPage, formatDateTime } from './settings.page';
 
 const SETTINGS: SettingsDto = {
   ownerLimits: { oilTempMaxC: 115, coolantTempMaxC: null, battery12vMinPercent: null, tyrePressureDeviationBar: null },
@@ -27,14 +28,22 @@ const SCENARIO_LIST: ScenarioDto[] = [
   { id: 'signals-missing', title: 'Сигнали відсутні' },
 ];
 
+const DEVICES: DeviceDto[] = [
+  { deviceId: 'test-device-000000000002', label: 'Новий блок', createdAt: Date.UTC(2026, 10, 12, 9, 5), lastSeenAt: null },
+  { deviceId: 'test-device-000000000001', label: 'Головний блок', createdAt: Date.UTC(2026, 10, 1, 8, 0), lastSeenAt: Date.UTC(2026, 10, 13, 7, 30) },
+];
+
 describe('SettingsPage', () => {
+  let devices: { list: ReturnType<typeof vi.fn>; remove: ReturnType<typeof vi.fn>; register: ReturnType<typeof vi.fn> };
   let live: { status: ReturnType<typeof signal<StatusDto | null>> };
   let api: { settings: ReturnType<typeof vi.fn>; saveSettings: ReturnType<typeof vi.fn>; scenarios: ReturnType<typeof vi.fn>; setScenario: ReturnType<typeof vi.fn> };
 
   async function render(): Promise<{ el: HTMLElement; update: () => Promise<void> }> {
     await TestBed.configureTestingModule({
       imports: [SettingsPage],
-      providers: [{ provide: LiveService, useValue: live }, { provide: ApiService, useValue: api }],
+      providers: [
+        { provide: LiveService, useValue: live }, { provide: ApiService, useValue: api }, { provide: DeviceApi, useValue: devices },
+      ],
     }).compileComponents();
     const fixture = TestBed.createComponent(SettingsPage);
     fixture.detectChanges();
@@ -48,6 +57,7 @@ describe('SettingsPage', () => {
   const button = (el: HTMLElement, label: string) => Array.from(el.querySelectorAll('button')).find((b) => text(b) === label)!;
 
   beforeEach(() => {
+    devices = { list: vi.fn(() => of(DEVICES)), remove: vi.fn(() => of(undefined)), register: vi.fn() };
     live = { status: signal<StatusDto | null>(status('mock')) };
     api = {
       settings: vi.fn(() => of(SETTINGS)),
@@ -192,5 +202,45 @@ describe('SettingsPage', () => {
     expect(el.querySelector('select#scenario')).toBeNull();
     expect(el.textContent).not.toContain('Демо-сценарій');
     expect(api.scenarios).not.toHaveBeenCalled();
+  });
+
+  it('lists the paired devices with when they were paired and last seen', async () => {
+    const { el } = await render();
+    expect(text(el.querySelector('#settings-devices'))).toBe('ПІДʼЄДНАНІ ПРИСТРОЇ');
+    const rows = Array.from(el.querySelectorAll('[data-device]'));
+    expect(rows.map((row) => row.getAttribute('data-device'))).toEqual(['test-device-000000000002', 'test-device-000000000001']);
+    const hint = (row: Element) => text(row.querySelector('.hint'));
+    expect(text(rows[0]).startsWith('Новий блок')).toBe(true);
+    expect(hint(rows[0])).toBe(`Підʼєднано ${formatDateTime(DEVICES[0].createdAt)} · ще не виходив на звʼязок`);
+    expect(text(rows[1]).startsWith('Головний блок')).toBe(true);
+    expect(hint(rows[1])).toBe(`Підʼєднано ${formatDateTime(DEVICES[1].createdAt)} · на звʼязку ${formatDateTime(DEVICES[1].lastSeenAt!)}`);
+    expect(rows.map((row) => text(row.querySelector('button')))).toEqual(['Відʼєднати', 'Відʼєднати']);
+  });
+
+  it('«Відʼєднати» revokes a device and removes its row; a failure keeps it and says so', async () => {
+    const { el, update } = await render();
+    const unpair = (id: string) => el.querySelector<HTMLButtonElement>(`[data-device="${id}"] button`)!;
+    devices.remove.mockReturnValueOnce(throwError(() => new HttpErrorResponse({ status: 500 })));
+    unpair('test-device-000000000002').click();
+    await update();
+    expect(devices.remove).toHaveBeenCalledWith('test-device-000000000002');
+    expect(el.querySelectorAll('[data-device]')).toHaveLength(2);
+    expect(text(el.querySelector('[data-devices-error]'))).toBe('Не вдалося відʼєднати пристрій. Спробуйте ще раз.');
+
+    unpair('test-device-000000000002').click();
+    await update();
+    expect(Array.from(el.querySelectorAll('[data-device]')).map((row) => row.getAttribute('data-device'))).toEqual(['test-device-000000000001']);
+    expect(el.querySelector('[data-devices-error]')).toBeNull();
+  });
+
+  it('with no paired device it says how to pair one', async () => {
+    devices.list.mockReturnValue(of([]));
+    const { el } = await render();
+    expect(el.textContent).toContain('Немає підʼєднаних пристроїв. Відскануйте QR-код на екрані авто, щоб підʼєднати його.');
+  });
+
+  it('formats times as day, month, year and hour in local time', () => {
+    const at = new Date(2026, 10, 3, 7, 5).getTime();
+    expect(formatDateTime(at)).toBe('03.11.2026, 07:05');
   });
 });

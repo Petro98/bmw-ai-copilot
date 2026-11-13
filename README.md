@@ -117,7 +117,29 @@ subscription: sign in there, open the organisation's API keys page, create a key
 use your subscription login or password in this project; the backend never needs them. The key is never logged and
 never appears in an API response.
 
-`VEHICLE_SOURCE` is `mock` in phase 1; the car link arrives with the car app (phase 2).
+## Owner access, device pairing and the car source
+
+- **Owner access.** Set `OWNER_TOKEN` (at least 24 characters, random) and `SESSION_SECRET` (at least 32
+  characters) in `.env`. The panel then opens «Вхід» first; the token is typed once and the browser keeps an
+  `HttpOnly`, `Secure`, `SameSite=Strict` session cookie for 30 days (`DELETE /api/session` ends it, a new
+  `SESSION_SECRET` ends every session). Without `OWNER_TOKEN` the API is open, so the backend refuses to start unless
+  `HOST` is a loopback address; inside the Docker Compose container `HOST` is `0.0.0.0`, so Compose needs both
+  variables in `.env`. The cookie is `Secure`: serve the panel over HTTPS (browsers also accept it on
+  `http://localhost`).
+- **Lock-out.** Five wrong tokens from one address within a minute lock that address out for a minute. The address
+  is the TCP peer of the backend: behind a reverse proxy (nginx in Docker Compose included) every visitor shares the
+  proxy's address, so one person mistyping locks everyone out for that minute. `X-Forwarded-For` is not trusted.
+- **Pairing the car.** The head-unit app makes its own device id and secret on its first run and shows a QR code
+  of `<panel address>/pair#d=<device id>&s=<secret>`. Scan it with the phone: the «Підʼєднати авто» page reads the
+  fragment, removes it from the address bar at once, asks for the owner's sign-in if needed, and registers the
+  device with a label. The backend keeps only a SHA-256 of the secret. «Налаштування» → «ПІДʼЄДНАНІ ПРИСТРОЇ»
+  lists the paired devices and «Відʼєднати» revokes one at once.
+- **The car as vehicle source.** `VEHICLE_SOURCE=car` replaces the mock vehicle with what the paired car posts to
+  `/car/v1/*` (each request carries `Authorization: Bearer <device id>.<secret>`). The car evaluates the alert rules
+  itself, so the backend runs no rule engine then; the demo scenarios (`/api/mock/*`) answer 404, and «АВТО» in the
+  panel shows connected while the car has reported within the last three minutes. A car that went quiet leaves its
+  last readings visible with their real times, so they age. The `/car/v1` paths must reach the backend through
+  whatever serves the panel's address.
 
 ## Tests and gates
 

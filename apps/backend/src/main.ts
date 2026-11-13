@@ -9,6 +9,9 @@ import { pino } from 'pino';
 import { AssistantService } from './assistant/assistant-service';
 import { assistantConfigFrom, loadConfig, type Config } from './config';
 import { openDatabase, type DatabaseSync } from './db/database';
+import { CarLinkVehicleDataProvider } from './features/car-link/car-link-provider';
+import { DeviceStore } from './features/car-link/device-store';
+import { DialogFeed } from './features/car-link/routes';
 import { buildApp } from './http/app';
 import { createLogger, type Logger } from './logger';
 import { AlertStore } from './stores/alert-store';
@@ -80,15 +83,21 @@ async function wire(
   const dialog = new DialogStore(db);
   const settings = new SettingsStore(db);
   const telemetry = new TelemetryStore(db);
-  const engineState = new EngineStateStore(db);
+  const devices = new DeviceStore(db);
+  // The assistant stores turns through the feed, so a waiting dialog poll of the car hears of each at once.
+  const feed = new DialogFeed(dialog);
 
+  // VEHICLE_SOURCE=car: the head unit evaluates the rules itself and posts its alerts, so the hub runs without an
+  // engine and the engine's saved state is neither read nor written.
+  const car = !injected && config.vehicleSource === 'car' ? new CarLinkVehicleDataProvider({ clock }) : null;
+  const engineState = car ? null : new EngineStateStore(db);
   // A fresh engine would clear a standing warning and raise it again under a new id: restore its memory.
-  const engine = new EventEngine(defaultEngineOptions());
-  const saved = engineState.load();
-  if (saved) engine.restore(saved);
+  const engine = car ? null : new EventEngine(defaultEngineOptions());
+  const saved = engineState?.load();
+  if (engine && saved) engine.restore(saved);
 
-  const mock = injected ? null : new MockVehicleDataProvider({ clock, timers, scenario: config.mockScenario });
-  const provider: VehicleDataProvider = injected ?? mock!;
+  const mock = injected || car ? null : new MockVehicleDataProvider({ clock, timers, scenario: config.mockScenario });
+  const provider: VehicleDataProvider = injected ?? car ?? mock!;
   const bus = new LiveBus();
   const hub = new VehicleHub({
     provider, engine, alerts, telemetry, settings, bus, clock,
@@ -99,12 +108,16 @@ async function wire(
     requestsPerMinute: config.rateLimitPerMinute, clock, store: new SqliteUsageStore(db),
   });
   const assistant = new AssistantService({
-    hub, dialog, alerts, settings, telemetry, gateway: gatewayFor(config), guard, clock,
+    hub, dialog: feed, alerts, settings, telemetry, gateway: gatewayFor(config), guard, clock,
     config: assistantConfigFrom(config), newId: randomUUID,
   });
-  const app = buildApp({ config, logger, hub, bus, assistant, dialog, alerts, settings, guard, mock, clock });
+  const app = buildApp({
+    config, logger, hub, bus, assistant, dialog, alerts, settings, guard, mock, clock,
+    carLink: { devices, provider: car, feed },
+  });
 
   const saveEngineState = (): void => {
+    if (!engine || !engineState) return;
     try {
       engineState.save(engine.state());   // writes only when keys or active flags changed
     } catch (error) {
@@ -114,7 +127,7 @@ async function wire(
 
   // The hub subscribes first, so this listener sees the state after the hub's evaluation of the same change.
   await hub.start();
-  const unsubscribeState = provider.onChange(saveEngineState);
+  const unsubscribeState = engine ? provider.onChange(saveEngineState) : () => undefined;
   try {
     await app.listen({ port: config.port, host: config.host });
   } catch (error) {

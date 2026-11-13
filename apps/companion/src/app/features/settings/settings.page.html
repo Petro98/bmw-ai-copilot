@@ -43,6 +43,28 @@
   }
 </section>
 
+<section class="block" aria-labelledby="settings-devices">
+  <h2 class="phone-label heading" id="settings-devices">ПІДʼЄДНАНІ ПРИСТРОЇ</h2>
+  @if (devices(); as list) {
+    @if (list.length === 0) {
+      <p class="explain">Немає підʼєднаних пристроїв. Відскануйте QR-код на екрані авто, щоб підʼєднати його.</p>
+    } @else {
+      <ul class="list">
+        @for (device of list; track device.deviceId) {
+          <li class="row" [attr.data-device]="device.deviceId">
+            <span class="stack">{{ device.label }}<span class="hint">Підʼєднано {{ formatDateTime(device.createdAt) }} · {{
+              device.lastSeenAt === null ? 'ще не виходив на звʼязок' : 'на звʼязку ' + formatDateTime(device.lastSeenAt) }}</span></span>
+            <button type="button" class="secondary" [disabled]="removing() !== null" (click)="unpair(device)">Відʼєднати</button>
+          </li>
+        }
+      </ul>
+    }
+  }
+  @if (devicesError(); as error) {
+    <p class="message" role="alert" data-devices-error>{{ error }}</p>
+  }
+</section>
+
 @if (status(); as s) {
   <section class="block" aria-labelledby="settings-claude">
     <h2 class="phone-label heading" id="settings-claude">CLAUDE</h2>

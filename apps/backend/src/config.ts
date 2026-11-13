@@ -21,18 +21,28 @@ export interface Config {
   budgetMonthlyUsd: number;           // BUDGET_MONTHLY_USD=20
   rateLimitPerMinute: number;         // RATE_LIMIT_PER_MINUTE=10
   historyTurns: number;               // HISTORY_TURNS=4
-  vehicleSource: 'mock' | 'car';      // VEHICLE_SOURCE=mock ('car' arrives with Plan 2)
+  vehicleSource: 'mock' | 'car';      // VEHICLE_SOURCE=mock (car: the head unit reports through /car/v1)
   mockScenario: ScenarioId;           // MOCK_SCENARIO=steady-cruise
   vehicleLabel: string | null;        // VEHICLE_LABEL= (no VIN, no personal data)
   telemetrySampleIntervalMs: number;  // TELEMETRY_SAMPLE_INTERVAL_MS=60000
   telemetryRetentionDays: number;     // TELEMETRY_RETENTION_DAYS=90
   corsOrigin: string;                 // CORS_ORIGIN=http://localhost:4200
   logLevel: LogLevel;                 // LOG_LEVEL=info
+  ownerToken: string | null;          // OWNER_TOKEN= (never logged, never in a response; unset: open API, loopback HOST only)
+  sessionSecret: string | null;       // SESSION_SECRET= (signs the owner's session cookie; required with OWNER_TOKEN)
 }
 
 const EFFORTS: readonly Effort[] = ['low', 'medium', 'high'];
 const LOG_LEVELS: readonly LogLevel[] = ['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'];
 const MAX_VEHICLE_LABEL_CHARS = 80;
+const MIN_OWNER_TOKEN_CHARS = 24;
+const MIN_SESSION_SECRET_CHARS = 32;
+const MAX_SECRET_CHARS = 512;
+
+/** True for an address that only this machine can reach. */
+export function isLoopbackHost(host: string): boolean {
+  return host === 'localhost' || host === '::1' || /^127(\.\d{1,3}){3}$/.test(host);
+}
 
 /**
  * Reads and validates the environment. Every invalid variable is collected and reported in one error.
@@ -95,7 +105,27 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
   const claudeModel = text('CLAUDE_MODEL', 'claude-opus-5-5');
 
   const vehicleSource = oneOf('VEHICLE_SOURCE', 'mock', ['mock', 'car'] as const);
-  if (vehicleSource === 'car') problems.push('VEHICLE_SOURCE: car is not available yet (the car link comes with Plan 2); use mock');
+
+  // Secrets: the messages name the variable and the rule, never the value.
+  const secret = (name: string, minChars: number): string | null => {
+    const value = raw(name);
+    if (value === null) return null;
+    if (/\s/.test(value) || value.length < minChars || value.length > MAX_SECRET_CHARS) {
+      problems.push(`${name}: must be ${minChars} to ${MAX_SECRET_CHARS} characters without spaces`);
+      return null;
+    }
+    return value;
+  };
+  const ownerTokenGiven = raw('OWNER_TOKEN') !== null;
+  const ownerToken = secret('OWNER_TOKEN', MIN_OWNER_TOKEN_CHARS);
+  const sessionSecret = secret('SESSION_SECRET', MIN_SESSION_SECRET_CHARS);
+  if (ownerTokenGiven && raw('SESSION_SECRET') === null) {
+    problems.push(`SESSION_SECRET: must be set (at least ${MIN_SESSION_SECRET_CHARS} characters) when OWNER_TOKEN is set`);
+  }
+  const host = text('HOST', '127.0.0.1');
+  if (!ownerTokenGiven && !isLoopbackHost(host)) {
+    problems.push('HOST: a non-loopback address needs OWNER_TOKEN and SESSION_SECRET (without OWNER_TOKEN the API is open)');
+  }
 
   const vehicleLabel = raw('VEHICLE_LABEL');
   if (vehicleLabel !== null && vehicleLabel.length > MAX_VEHICLE_LABEL_CHARS) {
@@ -107,7 +137,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
 
   const config: Config = {
     port: integer('PORT', 3000, 0, 65535),
-    host: text('HOST', '127.0.0.1'),
+    host,
     databasePath: raw('DATABASE_PATH') ?? './data/copilot.sqlite',
     anthropicApiKey: apiKey,
     claudeMode: mode === 'mock' || (mode === 'auto' && apiKey === null) ? 'mock' : 'live',
@@ -128,6 +158,8 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     telemetryRetentionDays: integer('TELEMETRY_RETENTION_DAYS', 90, 1, 3650),
     corsOrigin,
     logLevel: oneOf('LOG_LEVEL', 'info', LOG_LEVELS),
+    ownerToken: ownerToken !== null && sessionSecret !== null ? ownerToken : null,
+    sessionSecret: ownerToken !== null && sessionSecret !== null ? sessionSecret : null,
   };
 
   if (problems.length > 0) {

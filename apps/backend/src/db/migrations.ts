@@ -86,6 +86,16 @@ export const MIGRATIONS: readonly string[] = [
     state TEXT NOT NULL
   );
   `,
+  // 3: paired head units (Plan 2 Task 7). Only a SHA-256 of each device secret is kept, never the secret.
+  `
+  CREATE TABLE devices (
+    device_id    TEXT PRIMARY KEY,
+    label        TEXT NOT NULL,
+    secret_hash  TEXT NOT NULL,
+    created_at   INTEGER NOT NULL,
+    last_seen_at INTEGER
+  );
+  `,
 ];
 
 /** Applies every migration the database has not seen yet. Safe to call any number of times. */

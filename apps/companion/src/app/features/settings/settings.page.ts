@@ -1,11 +1,12 @@
 import { HttpErrorResponse } from '@angular/common/http';
 import { Component, OnInit, computed, effect, inject, linkedSignal, signal, untracked } from '@angular/core';
 import type { OwnerLimits } from '@copilot/event-engine';
-import type { ScenarioDto, SettingsDto } from '@copilot/shared';
+import type { DeviceDto, ScenarioDto, SettingsDto } from '@copilot/shared';
 import type { ScenarioId } from '@copilot/vehicle-core';
 import { ApiService } from '../../core/api.service';
 import { formatNumber } from '../../core/format';
 import { LiveService } from '../../core/live.service';
+import { DeviceApi } from '../pair/pair.page';
 
 export interface LimitView { key: keyof OwnerLimits; label: string; unit: string }
 
@@ -19,6 +20,16 @@ export const LIMITS: ReadonlyArray<LimitView> = [
 
 const SAVE_FAILED = 'Не вдалося зберегти. Спробуйте ще раз.';
 const LOAD_FAILED = 'Не вдалося завантажити налаштування. Спробуйте ще раз.';
+const DEVICES_FAILED = 'Не вдалося завантажити список пристроїв. Спробуйте ще раз.';
+const UNPAIR_FAILED = 'Не вдалося відʼєднати пристрій. Спробуйте ще раз.';
+
+const two = (n: number): string => String(n).padStart(2, '0');
+
+/** «03.11.2026, 07:05» in the phone's local time. */
+export function formatDateTime(at: number): string {
+  const d = new Date(at);
+  return `${two(d.getDate())}.${two(d.getMonth() + 1)}.${d.getFullYear()}, ${two(d.getHours())}:${two(d.getMinutes())}`;
+}
 
 /** The server's Ukrainian `ApiError` message when there is one, otherwise the fallback. */
 function errorMessage(error: unknown, fallback: string): string {
@@ -29,7 +40,10 @@ function errorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
-/** Owner limits, pop-ups, diagnostics (off), models, spend and — with the mock vehicle — the demo scenario. */
+/**
+ * Owner limits, pop-ups, diagnostics (off), models, spend, the paired devices and — with the mock vehicle — the demo
+ * scenario.
+ */
 @Component({
   selector: 'app-settings-page',
   templateUrl: './settings.page.html',
@@ -38,6 +52,7 @@ function errorMessage(error: unknown, fallback: string): string {
 export class SettingsPage implements OnInit {
   private readonly api = inject(ApiService);
   private readonly live = inject(LiveService);
+  private readonly deviceApi = inject(DeviceApi);
 
   protected readonly limits = LIMITS;
   protected readonly settings = signal<SettingsDto | null>(null);
@@ -69,6 +84,12 @@ export class SettingsPage implements OnInit {
   protected readonly scenarioError = signal<string | null>(null);
   private scenariosRequested = false;
 
+  /** Paired head units, newest pairing first; null until loaded. */
+  protected readonly devices = signal<DeviceDto[] | null>(null);
+  protected readonly devicesError = signal<string | null>(null);
+  protected readonly removing = signal<string | null>(null);
+  protected readonly formatDateTime = formatDateTime;
+
   constructor() {
     // The scenario list only exists while the vehicle source is `mock` (404 otherwise), so ask for it then.
     effect(() => {
@@ -88,6 +109,27 @@ export class SettingsPage implements OnInit {
     this.api.settings().subscribe({
       next: (settings) => this.settings.set(settings),
       error: (error: unknown) => this.loadError.set(errorMessage(error, LOAD_FAILED)),
+    });
+    this.deviceApi.list().subscribe({
+      next: (list) => this.devices.set(list),
+      error: (error: unknown) => this.devicesError.set(errorMessage(error, DEVICES_FAILED)),
+    });
+  }
+
+  /** «Відʼєднати»: the backend refuses the device's requests from now on. */
+  protected unpair(device: DeviceDto): void {
+    if (this.removing() !== null) return;
+    this.removing.set(device.deviceId);
+    this.devicesError.set(null);
+    this.deviceApi.remove(device.deviceId).subscribe({
+      next: () => {
+        this.removing.set(null);
+        this.devices.update((list) => (list ?? []).filter((d) => d.deviceId !== device.deviceId));
+      },
+      error: (error: unknown) => {
+        this.removing.set(null);
+        this.devicesError.set(errorMessage(error, UNPAIR_FAILED));
+      },
     });
   }
 

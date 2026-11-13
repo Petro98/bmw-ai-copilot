@@ -32,6 +32,8 @@ describe('loadConfig', () => {
       telemetryRetentionDays: 90,
       corsOrigin: 'http://localhost:4200',
       logLevel: 'info',
+      ownerToken: null,
+      sessionSecret: null,
     });
 
     let message = '';
@@ -68,8 +70,9 @@ describe('loadConfig', () => {
     expect(loadConfig({ ANTHROPIC_API_KEY: FAKE_KEY, CLAUDE_MODE: 'live' }).anthropicApiKey).toBe(FAKE_KEY);
   });
 
-  test('the car source is refused until the car link exists (Plan 2)', () => {
-    expect(() => loadConfig({ VEHICLE_SOURCE: 'car' })).toThrow(/VEHICLE_SOURCE/);
+  test('the car source is accepted since the car link exists (Plan 2 Task 7); anything else is refused', () => {
+    expect(loadConfig({ VEHICLE_SOURCE: 'car' }).vehicleSource).toBe('car');
+    expect(() => loadConfig({ VEHICLE_SOURCE: 'bus' })).toThrow(/VEHICLE_SOURCE/);
   });
 });
 

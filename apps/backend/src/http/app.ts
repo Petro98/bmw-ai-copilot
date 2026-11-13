@@ -5,6 +5,8 @@ import type { StatusDto } from '@copilot/shared';
 import type { Clock, MockVehicleDataProvider } from '@copilot/vehicle-core';
 import type { AssistantService } from '../assistant/assistant-service';
 import type { Config } from '../config';
+import { accessRoutes, ownerAuthHook } from '../features/access/routes';
+import { carLinkRoutes, type CarLinkDeps } from '../features/car-link/routes';
 import type { Logger } from '../logger';
 import type { AlertStore } from '../stores/alert-store';
 import type { DialogStore } from '../stores/dialog-store';
@@ -37,6 +39,8 @@ export interface AppDeps {
   guard: CostGuard;
   mock: MockVehicleDataProvider | null;   // null unless the vehicle source is the mock
   clock: Clock;
+  /** Device pairing and the /car/v1 routes (Plan 2 Task 7); without it neither is served. */
+  carLink?: CarLinkDeps;
 }
 
 /** What every route module receives: the dependencies plus the app's shared HTTP helpers. */
@@ -60,7 +64,16 @@ export const ROUTE_MODULES: readonly RouteModule[] = [
   eventsRoutes,
   settingsRoutes,
   mockRoutes,
+  accessRoutes,
+  carLinkRoutes,
 ];
+
+/** The StatusDto; with the car link, `vehicle.connected` is whether the car reported within the last minutes. */
+function statusOf(deps: AppDeps): StatusDto {
+  const status = buildStatus(deps);
+  const provider = deps.carLink?.provider;
+  return provider ? { ...status, vehicle: { ...status.vehicle, connected: provider.connected() } } : status;
+}
 
 /**
  * The REST + SSE API. Reads the vehicle state only; no route writes to or controls a vehicle.
@@ -79,10 +92,10 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   const ctx: RouteContext = {
     ...deps,
     sse,
-    status: () => buildStatus(deps),
+    status: () => statusOf(deps),
     publishStatus: () => {
       try {
-        deps.bus.publish({ type: 'status', status: buildStatus(deps) });
+        deps.bus.publish({ type: 'status', status: statusOf(deps) });
       } catch (error) {
         deps.logger.warn({ err: error }, 'status event not published');
       }
@@ -91,6 +104,9 @@ export function buildApp(deps: AppDeps): FastifyInstance {
 
   // The plugin's default methods are GET,HEAD,POST; PUT /api/settings needs PUT in the preflight answer.
   void app.register(cors, { origin: deps.config.corsOrigin, methods: ['GET', 'HEAD', 'POST', 'PUT'] });
+
+  // Owner access: with OWNER_TOKEN set, /api routes (but health and session) need the session cookie.
+  app.addHook('onRequest', ownerAuthHook(ctx));
 
   app.setErrorHandler((error, request, reply) => {
     const { status, body, internal } = toApiError(error);

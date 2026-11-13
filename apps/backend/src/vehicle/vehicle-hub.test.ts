@@ -284,6 +284,27 @@ describe('VehicleHub', () => {
     expect(r.alertEvents()).toHaveLength(2);
   });
 
+  test('ingestAlert applies only the state of a known id, keeps its content and skips repeats', async () => {
+    r = rig({ engine: null });
+    await r.hub.start();
+    const event: AlertEvent = {
+      id: 'owner-limit:oil:1000', ruleId: 'owner-limit', dedupKey: 'oil', provenance: 'owner-configured',
+      severity: 'warning', title: 'Температура масла вище вашого ліміту', detail: null,
+      at: 1000, active: true, clearedAt: null,
+    };
+    expect(r.hub.ingestAlert(event)).toBe(true);
+    expect(r.hub.ingestAlert(event)).toBe(false);
+    // A clearing rebuilt by a restarted car: no content of its own.
+    const rebuilt = { ...event, severity: 'info' as const, title: '', active: false, clearedAt: 2000 };
+    expect(r.hub.ingestAlert(rebuilt)).toBe(true);
+    expect(r.hub.ingestAlert({ ...rebuilt, clearedAt: 2500 })).toBe(false);
+    expect(r.alerts.recent(10)).toEqual([{ ...event, active: false, clearedAt: 2000 }]);
+    // Re-opened under the same id.
+    expect(r.hub.ingestAlert({ ...event, at: 3000 })).toBe(true);
+    expect(r.alerts.recent(10)).toEqual([event]);
+    expect(r.alertEvents()).toEqual([event, { ...event, active: false, clearedAt: 2000 }, event]);
+  });
+
   test('snapshot() is the provider snapshot and lastSnapshotAt is null before the first change', async () => {
     r = rig();
     expect(r.hub.lastSnapshotAt()).toBeNull();
