@@ -1,0 +1,44 @@
+import type { AlertEvent, OwnerLimits } from '@copilot/event-engine';
+import type { VehicleSnapshot } from '@copilot/vehicle-core';
+
+export type AnswerStyle = 'full' | 'spoken';
+
+export interface HistoryTurn { question: string; answer: string }
+
+export interface PromptInput {
+  question: string; style: AnswerStyle; snapshot: VehicleSnapshot; alerts: AlertEvent[];
+  limits: OwnerLimits; history: HistoryTurn[]; trendSummary: string | null;
+  vehicleLabel: string | null; now: number;
+}
+
+export interface SystemBlock { type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }
+
+export interface BuiltPrompt { system: SystemBlock[]; messages: Array<{ role: 'user' | 'assistant'; content: string }> }
+
+export type Effort = 'low' | 'medium' | 'high';
+
+export interface AskOptions { model: string; effort: Effort; maxTokens: number; timeoutMs: number; onDelta?: (text: string) => void; signal?: AbortSignal }
+
+export interface Usage { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }
+
+export interface ClaudeResult { text: string; model: string; usage: Usage }
+
+export interface ClaudeGateway { ask(prompt: BuiltPrompt, options: AskOptions): Promise<ClaudeResult> }
+
+export type ClaudeErrorCode =
+  | 'refusal' | 'empty-answer' | 'rate-limited' | 'overloaded' | 'credit-exhausted'
+  | 'auth' | 'timeout' | 'network' | 'bad-request' | 'unknown';
+
+/** A failed Claude request, already classified. `message` never contains the API key or request headers. */
+export class ClaudeError extends Error {
+  constructor(readonly code: ClaudeErrorCode, message: string, readonly retryable: boolean) {
+    super(message);
+    this.name = 'ClaudeError';
+  }
+}
+
+export interface UsageStore {                          // implemented by the backend (Task 10), used by the cost guard (Task 9)
+  add(day: string, model: string, usage: Usage, usd: number): void;   // day 'YYYY-MM-DD' (UTC)
+  usdForDay(day: string): number;
+  usdForMonth(month: string): number;                                  // 'YYYY-MM'
+}

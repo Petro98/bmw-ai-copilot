@@ -1,0 +1,18 @@
+{
+  "name": "@copilot/ai-core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Prompt construction, Claude gateways and cost guard (backend only).",
+  "license": "MIT",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "dependencies": {
+    "@anthropic-ai/sdk": "1.8.0",
+    "@copilot/event-engine": "0.1.0",
+    "@copilot/vehicle-core": "0.1.0"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run --passWithNoTests"
+  }
+}
