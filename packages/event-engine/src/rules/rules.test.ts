@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { SCENARIOS, ScenarioId, VehicleSnapshot, available } from '@copilot/vehicle-core';
+import { SCENARIOS, ScenarioId, VehicleSnapshot, available, unavailable } from '@copilot/vehicle-core';
 import { EventEngine } from '../engine';
 import { AlertEvent, NO_LIMITS, OwnerLimits } from '../types';
 import { THIRTY_DAYS_MS, defaultEngineOptions, defaultRules } from './index';
@@ -96,6 +96,7 @@ test('an all-unavailable snapshot raises nothing and does not throw', () => {
   expect(() => runScenario(engine, 'signals-missing', 0, 10 * MINUTE, all)).not.toThrow();
   expect(engine.history()).toEqual([]);
   expect(engine.active()).toEqual([]);
+  expect(engine.state().keys).toEqual([]); // nothing is held either
 });
 
 test('Check Control uses the car text and its severity', () => {
@@ -256,4 +257,155 @@ test('nothing is raised while reversing; it is raised once the gear leaves R', (
   const out = raised(step(engine, build(81 * SECOND), 81 * SECOND));
   expect(out).toHaveLength(1);
   expect(out[0]).toMatchObject({ dedupKey: 'cc:39', severity: 'critical' });
+});
+
+/** The overheat scenario at `elapsedMs` with its Check Control list unavailable (provider start, resume, stale). */
+function overheatWithoutCheckControl(elapsedMs: number): VehicleSnapshot {
+  const s = scenario('overheat-check-control')(elapsedMs);
+  s.checkControl = unavailable('not-reported');
+  return s;
+}
+
+test('an active Check Control alert survives the list becoming unavailable and stays the same alert', () => {
+  const engine = newEngine();
+  const build = scenario('overheat-check-control');
+  const up = raised(runScenario(engine, 'overheat-check-control', 0, 64 * SECOND));
+  expect(up.map((e) => e.dedupKey)).toEqual(['cc:39']);
+  const id = up[0].id;
+
+  // Unknown for 20 minutes, twice the cooldown: nothing is cleared or raised.
+  for (let t = 65 * SECOND; t <= 20 * MINUTE; t += SECOND) {
+    expect(step(engine, overheatWithoutCheckControl(t), t)).toEqual([]);
+  }
+  expect(engine.active().map((e) => e.id)).toEqual([id]);
+
+  // The car reports the same standing message again: the same alert, no new event, no pop-up.
+  for (let t = 20 * MINUTE + SECOND; t <= 21 * MINUTE; t += SECOND) expect(step(engine, build(t), t)).toEqual([]);
+  expect(engine.active().map((e) => e.id)).toEqual([id]);
+  expect(engine.history()).toHaveLength(1);
+  expect(engine.state().keys).toHaveLength(1);
+
+  // The list is known again and no longer has the message: cleared.
+  const gone = build(21 * MINUTE + SECOND);
+  gone.checkControl = available([], null, 'mock', START + 21 * MINUTE + SECOND);
+  const cleared = step(engine, gone, 21 * MINUTE + SECOND);
+  expect(cleared).toEqual([expect.objectContaining({ id, active: false, clearedAt: START + 21 * MINUTE + SECOND })]);
+  expect(engine.active()).toEqual([]);
+});
+
+test('a dwelling Check Control message neither raises nor restarts while the list is unavailable', () => {
+  // Message 39 first appears at 60 s; dwell 4 s.
+  const engine = newEngine();
+  const build = scenario('overheat-check-control');
+  expect(runScenario(engine, 'overheat-check-control', 0, 61 * SECOND)).toEqual([]); // 1 s of dwell
+  for (let t = 62 * SECOND; t <= 200 * SECOND; t += SECOND) {
+    expect(step(engine, overheatWithoutCheckControl(t), t)).toEqual([]);
+  }
+  expect(step(engine, build(201 * SECOND), 201 * SECOND)).toEqual([]); // 2 s
+  expect(step(engine, build(202 * SECOND), 202 * SECOND)).toEqual([]); // 3 s
+  expect(raised(step(engine, build(203 * SECOND), 203 * SECOND)).map((e) => e.dedupKey)).toEqual(['cc:39']);
+});
+
+test('service and fault alerts are held while their lists are unavailable', () => {
+  const service = newEngine();
+  const cruise = scenario('steady-cruise');
+  expect(raised(step(service, cruise(0), 0))).toHaveLength(1);
+  for (let t = SECOND; t <= 10 * SECOND; t += SECOND) {
+    const s = cruise(t);
+    s.serviceItems = unavailable('stale');
+    expect(step(service, s, t)).toEqual([]);
+  }
+  expect(service.active().map((e) => e.dedupKey)).toEqual(['service:3:due-soon']);
+  const none = cruise(11 * SECOND);
+  none.serviceItems = available([], null, 'mock', START + 11 * SECOND);
+  expect(step(service, none, 11 * SECOND)).toEqual([expect.objectContaining({ dedupKey: 'service:3:due-soon', active: false })]);
+
+  const faults = newEngine();
+  const stored = scenario('stored-faults');
+  expect(raised(runScenario(faults, 'stored-faults', 0, 5 * SECOND))).toHaveLength(1);
+  for (let t = 6 * SECOND; t <= 15 * MINUTE; t += 10 * SECOND) {
+    const s = stored(t);
+    s.faultCodes = unavailable('diagnostics-disabled');
+    expect(step(faults, s, t)).toEqual([]);
+  }
+  expect(faults.active().map((e) => e.dedupKey)).toEqual(['fault:DEMO-ECU-A:DEMO-0001']);
+  expect(runScenario(faults, 'stored-faults', 15 * MINUTE + SECOND, 16 * MINUTE)).toEqual([]);
+  expect(faults.history()).toHaveLength(1);
+});
+
+test('an owner oil alert is held while the reading is unavailable and clears once it is back below the margin', () => {
+  const engine = newEngine();
+  const l = limits({ oilTempMaxC: 115 });
+  for (let t = 0; t <= 5 * SECOND; t += SECOND) step(engine, withOil(t, 117), t, l);
+  expect(engine.active().map((e) => e.dedupKey)).toEqual(['limit:oilTempMaxC']);
+
+  for (let t = 6 * SECOND; t <= 20 * MINUTE; t += SECOND) {
+    const s = withOil(t, 0);
+    s.oilTemp = unavailable('stale');
+    expect(step(engine, s, t, l)).toEqual([]);
+  }
+  expect(engine.active().map((e) => e.dedupKey)).toEqual(['limit:oilTempMaxC']);
+  expect(engine.history()).toHaveLength(1);
+
+  // Known again, still within the margin: the same alert; below the margin: cleared.
+  const back = 20 * MINUTE + SECOND;
+  expect(step(engine, withOil(back, 114), back, l)).toEqual([]);
+  expect(engine.history()).toHaveLength(1);
+  const cleared = step(engine, withOil(back + SECOND, 112), back + SECOND, l);
+  expect(cleared).toEqual([expect.objectContaining({ dedupKey: 'limit:oilTempMaxC', active: false })]);
+});
+
+test('removing the owner limit clears its alert even while the reading is unavailable', () => {
+  const engine = newEngine();
+  const l = limits({ oilTempMaxC: 115 });
+  for (let t = 0; t <= 5 * SECOND; t += SECOND) step(engine, withOil(t, 117), t, l);
+  const s = withOil(6 * SECOND, 0);
+  s.oilTemp = unavailable('not-reported');
+  expect(step(engine, s, 6 * SECOND, l)).toEqual([]);
+  const cleared = step(engine, s, 7 * SECOND, NO_LIMITS);
+  expect(cleared).toEqual([expect.objectContaining({ dedupKey: 'limit:oilTempMaxC', active: false })]);
+  expect(engine.active()).toEqual([]);
+});
+
+test('tyre alerts: known wheels are evaluated, unknown wheels are held', () => {
+  const engine = newEngine();
+  const l = limits({ tyrePressureDeviationBar: 0.3 });
+  const lowTyre = scenario('low-tyre');
+  /** The low-tyre picture without its own Check Control message, so only the tyre rule is under test. */
+  const build = (t: number): VehicleSnapshot => {
+    const s = lowTyre(t);
+    s.checkControl = available([], null, 'mock', START + t);
+    return s;
+  };
+  /** The low-tyre picture with the front right wheel also off its target by 0.5 bar. */
+  const both = (t: number): VehicleSnapshot => {
+    const s = build(t);
+    const target = s.tyrePressureTarget.frontRight;
+    if (!target.available) throw new Error('low-tyre has a front right target');
+    s.tyrePressure.frontRight = available(target.value - 0.5, 'bar', 'mock', START + t);
+    return s;
+  };
+  for (let t = 0; t <= 20 * SECOND; t += SECOND) step(engine, both(t), t, l);
+  expect(engine.active().map((e) => e.dedupKey).sort()).toEqual(['limit:tyre:frontRight', 'limit:tyre:rearLeft']);
+
+  // Rear left unknown (its pressure, then its target); front right back on target: only front right clears.
+  const t1 = 21 * SECOND;
+  const s1 = build(t1);
+  s1.tyrePressure.rearLeft = unavailable('stale');
+  expect(step(engine, s1, t1, l)).toEqual([expect.objectContaining({ dedupKey: 'limit:tyre:frontRight', active: false })]);
+  for (let t = 22 * SECOND; t <= 15 * MINUTE; t += SECOND) {
+    const s = build(t);
+    s.tyrePressureTarget.rearLeft = unavailable('not-reported');
+    expect(step(engine, s, t, l)).toEqual([]);
+  }
+  expect(engine.active().map((e) => e.dedupKey)).toEqual(['limit:tyre:rearLeft']);
+
+  // Rear left known again and back on its target: cleared.
+  const t2 = 15 * MINUTE + SECOND;
+  const s2 = build(t2);
+  const target = s2.tyrePressureTarget.rearLeft;
+  if (!target.available) throw new Error('low-tyre has a rear left target');
+  s2.tyrePressure.rearLeft = available(target.value, 'bar', 'mock', START + t2);
+  expect(step(engine, s2, t2, l)).toEqual([expect.objectContaining({ dedupKey: 'limit:tyre:rearLeft', active: false })]);
+  expect(engine.history()).toHaveLength(2);
 });

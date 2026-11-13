@@ -334,6 +334,38 @@ describe('VehicleHub', () => {
       expect(r.alertEvents()).toHaveLength(1);   // cleared once, not on every change
     });
 
+    test('after a restart an alert whose reading is unknown stays active until the reading says it is gone', async () => {
+      const db = openDatabase(':memory:');
+      const first = rig({ db, scenario: 'overheat-check-control' });
+      await first.hub.start();
+      first.advance(3 * MINUTE);
+      const raised = first.alerts.active();
+      expect(raised).toHaveLength(1);
+      const saved = (first.engine as EventEngine).state();
+      await first.hub.stop();
+
+      const engine = new EventEngine(defaultEngineOptions());
+      engine.restore(saved);
+      r = rig({ db, engine, scenario: 'signals-missing', start: first.clock.t + 15 * MINUTE });
+      await r.hub.start();
+      r.advance(5 * SECOND);
+      // Unknown is not gone: the engine still holds the key, so the store keeps the same alert active.
+      expect(engine.state().keys.filter((k) => k.active).map((k) => k.dedupKey)).toEqual([raised[0].dedupKey]);
+      expect(r.alerts.recent(50)).toEqual(raised);
+      expect(r.alertEvents()).toEqual([]);
+
+      r.advance(11 * MINUTE, 10 * SECOND);   // still unknown, well past the 10 min cooldown
+      expect(r.alerts.recent(50)).toEqual(raised);
+      expect(r.alertEvents()).toEqual([]);
+
+      r.provider.setScenario('parked');   // the list is available again and no longer holds the message
+      const cleared = { ...raised[0], active: false, clearedAt: r.clock.t };
+      expect(r.alerts.recent(50)).toEqual([cleared]);
+      expect(r.alertEvents()).toEqual([cleared]);
+      r.advance(10 * SECOND);
+      expect(r.alertEvents()).toHaveLength(1);
+    });
+
     test('after a restart an alert whose condition is still present stays active and is not raised again', async () => {
       const db = openDatabase(':memory:');
       const first = rig({ db, scenario: 'overheat-check-control' });

@@ -13,9 +13,10 @@ export function checkControlRule(): Rule {
     provenance: 'bmw-check-control',
     dwellMs: 4000,
     cooldownMs: TEN_MINUTES_MS,
-    evaluate(ctx: RuleContext): Candidate[] {
+    evaluate(ctx: RuleContext): Candidate[] | null {
       const reading = ctx.snapshot.checkControl;
-      if (!reading.available || !Array.isArray(reading.value)) return [];
+      // An unavailable list is unknown, not empty: the engine keeps this rule's alerts as they are.
+      if (!reading.available || !Array.isArray(reading.value)) return null;
       const out: Candidate[] = [];
       for (const message of reading.value) {
         if (!message) continue;

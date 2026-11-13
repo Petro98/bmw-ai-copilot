@@ -165,6 +165,43 @@ describe('RuleRunner', () => {
     expect(isReopened(s.all()[0])).toBe(true);
   });
 
+  test('Check Control unknown on start or resume neither clears an alert nor raises it again', () => {
+    // Live: the provider resets Check Control to not-reported on resume (emptySnapshot has it not-reported).
+    const { raised, s } = raiseCc7(1_000_000);
+    const before = s.batches.length;
+    s.provider.snap = emptySnapshot(s.clock.t);
+    for (let i = 0; i < 15 * 60; i++) {                      // 15 minutes unknown: longer than the cooldown
+      s.clock.t += 1000;
+      s.runner.tick();
+    }
+    s.provider.snap = withCheckControl([CC7], s.clock.t);    // the same standing message again
+    for (let i = 0; i < 10; i++) {
+      s.clock.t += 1000;
+      s.runner.tick();
+    }
+    expect(s.batches).toHaveLength(before);                  // no clearing, no new raise, no re-open
+    expect(s.engine.active().map((e) => e.id)).toEqual([raised.id]);
+    s.provider.snap = withCheckControl([], s.clock.t);
+    s.clock.t += 1000;
+    s.runner.tick();
+    expect(s.batches[before]).toEqual([expect.objectContaining({ id: raised.id, active: false, clearedAt: s.clock.t })]);
+
+    // After a restart: unknown at the first ticks keeps the restored alert waiting, then it is re-opened once.
+    const engine = new EventEngine(defaultEngineOptions());
+    engine.restore(raiseCc7(2_000_000).state);
+    const r = setup(engine, 2_000_000 + 60_000);
+    r.provider.snap = emptySnapshot(r.clock.t);
+    for (let i = 0; i < 5; i++) {
+      r.runner.tick();
+      r.clock.t += 1000;
+    }
+    expect(r.batches).toEqual([]);
+    r.provider.snap = withCheckControl([CC7], r.clock.t);
+    r.runner.tick();
+    expect(r.all()).toHaveLength(1);
+    expect(isReopened(r.all()[0])).toBe(true);
+  });
+
   test('an alert back inside its cooldown is reported re-opened, never raised again, and its end is reported', () => {
     const s = setup();
     s.provider.snap = withCheckControl([CC7], s.clock.t);

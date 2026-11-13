@@ -10,9 +10,10 @@ export function serviceRule(): Rule {
     provenance: 'bmw-service',
     dwellMs: 0,
     cooldownMs: THIRTY_DAYS_MS,
-    evaluate(ctx: RuleContext): Candidate[] {
+    evaluate(ctx: RuleContext): Candidate[] | null {
       const reading = ctx.snapshot.serviceItems;
-      if (!reading.available || !Array.isArray(reading.value)) return [];
+      // An unavailable list is unknown, not empty: the engine keeps this rule's alerts as they are.
+      if (!reading.available || !Array.isArray(reading.value)) return null;
       const out: Candidate[] = [];
       for (const item of reading.value) {
         if (!item || (item.status !== 'due-soon' && item.status !== 'overdue')) continue;

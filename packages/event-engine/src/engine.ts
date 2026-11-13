@@ -41,6 +41,8 @@ export class EventEngine {
   private raisedAt: number[] = [];
   /** Newest first, at most options.historySize. */
   private events: AlertEvent[] = [];
+  /** `now` of the previous evaluate() call; null before the first one (and after restore()). */
+  private lastNow: number | null = null;
 
   constructor(options: EngineOptions) {
     this.options = options;
@@ -49,11 +51,25 @@ export class EventEngine {
     }
   }
 
-  /** Events raised or cleared by this call: raised ones first (critical, warning, info), then cleared ones. */
+  /**
+   * Events raised or cleared by this call: raised ones first (critical, warning, info), then cleared ones.
+   *
+   * Unknown is not gone. A rule that returns null (its data is unavailable) and a key a rule holds through
+   * ctx.hold() keep their state exactly: an active alert stays active under its id and is neither cleared nor
+   * raised again when its condition is reported again, and a pending key's dwell is frozen (the time of a call
+   * that could not evaluate it does not count, and its dwell does not restart). Only a rule that evaluated
+   * (returned an array) and did not hold a key clears it.
+   */
   evaluate(snapshot: VehicleSnapshot, now: number, limits: OwnerLimits): AlertEvent[] {
     const seenThisCall = new Set<string>();
-    /** Rules skipped this call (threw or returned a non-array): their keys are left exactly as they were. */
+    /** Rules skipped this call (threw, returned null or a non-array): their keys are left as they were. */
     const skippedRules = new Set<string>();
+    /** Rules that could not evaluate (returned null): their pending keys' dwell is frozen too. */
+    const unknownRules = new Set<string>();
+    /** Keys a rule that did evaluate could not evaluate (ctx.hold): kept like those of a rule returning null. */
+    const heldKeys = new Set<string>();
+    /** Holds of the rule being evaluated; merged into heldKeys only if it returns normally. */
+    let holding: { rule: Rule; keys: string[] } | null = null;
     const eligible: Eligible[] = [];
     const ctx: RuleContext = {
       snapshot,
@@ -63,28 +79,46 @@ export class EventEngine {
         const entry = this.keys.get(dedupKey);
         return entry !== undefined && entry.active;
       },
+      hold: (dedupKey: string) => {
+        if (holding === null || typeof dedupKey !== 'string') return;
+        const entry = this.keys.get(dedupKey);
+        // Only a key this rule already has can be held: holding never creates or grows any state.
+        if (entry !== undefined && entry.ruleId === holding.rule.id) holding.keys.push(dedupKey);
+      },
     };
 
     for (const rule of this.options.rules) {
-      let candidates: Candidate[];
+      let candidates: Candidate[] | null;
+      const current = { rule, keys: [] as string[] };
+      holding = current;
       try {
         candidates = rule.evaluate(ctx);
       } catch {
         skippedRules.add(rule.id); // a broken rule is skipped for this call; the others still run
+        continue;
+      } finally {
+        holding = null;
+      }
+      if (candidates === null) {
+        skippedRules.add(rule.id);
+        unknownRules.add(rule.id);
         continue;
       }
       if (!Array.isArray(candidates)) {
         skippedRules.add(rule.id);
         continue;
       }
+      for (const key of current.keys) heldKeys.add(key);
       for (const candidate of candidates) {
         const found = this.track(rule, candidate, now, seenThisCall);
         if (found) eligible.push(found);
       }
     }
 
+    this.freezeDwell(seenThisCall, unknownRules, heldKeys, now);
     const raised = this.raise(eligible, snapshot, now);
-    const cleared = this.forgetAbsent(seenThisCall, skippedRules, now);
+    const cleared = this.forgetAbsent(seenThisCall, skippedRules, heldKeys, now);
+    this.lastNow = now;
     return raised.concat(cleared);
   }
 
@@ -127,6 +161,7 @@ export class EventEngine {
    */
   restore(state: EngineState): void {
     this.keys.clear();
+    this.lastNow = null;
     const list = state && Array.isArray(state.keys) ? state.keys : [];
     for (const item of list) {
       if (!item || typeof item.dedupKey !== 'string' || typeof item.ruleId !== 'string') continue;
@@ -181,6 +216,22 @@ export class EventEngine {
     return { rule, candidate, entry };
   }
 
+  /**
+   * Pending keys that could not be evaluated in this call (rule returned null, or the key was held) do not
+   * advance their dwell: their firstSeenAt moves forward by the time since the previous call, so the time
+   * already dwelt is kept and the unknown interval is not counted. A clock that went backwards moves nothing.
+   */
+  private freezeDwell(seenThisCall: Set<string>, unknownRules: Set<string>, heldKeys: Set<string>, now: number): void {
+    if (unknownRules.size === 0 && heldKeys.size === 0) return;
+    const last = this.lastNow;
+    const elapsed = last !== null && now > last ? now - last : 0;
+    if (elapsed === 0) return;
+    this.keys.forEach((entry, key) => {
+      if (seenThisCall.has(key) || !entry.seen || entry.active) return;
+      if (heldKeys.has(key) || unknownRules.has(entry.ruleId)) entry.firstSeenAt += elapsed;
+    });
+  }
+
   /** Raises eligible candidates, most severe first, unless suppressed or over the global rate. */
   private raise(eligible: Eligible[], snapshot: VehicleSnapshot, now: number): AlertEvent[] {
     if (eligible.length === 0) return [];
@@ -207,13 +258,14 @@ export class EventEngine {
 
   /**
    * Clears active keys that were not among this call's candidates and forgets pending ones.
-   * Keys of a rule skipped in this call are untouched: an evaluation error is not evidence the condition went away.
+   * Keys of a rule skipped in this call (it threw or could not evaluate) and held keys are untouched: an
+   * evaluation error or an unavailable reading is not evidence the condition went away.
    */
-  private forgetAbsent(seenThisCall: Set<string>, skippedRules: Set<string>, now: number): AlertEvent[] {
+  private forgetAbsent(seenThisCall: Set<string>, skippedRules: Set<string>, heldKeys: Set<string>, now: number): AlertEvent[] {
     const cleared: AlertEvent[] = [];
     const remove: string[] = [];
     this.keys.forEach((entry, key) => {
-      if (seenThisCall.has(key) || skippedRules.has(entry.ruleId)) return;
+      if (seenThisCall.has(key) || heldKeys.has(key) || skippedRules.has(entry.ruleId)) return;
       if (entry.active) {
         if (entry.announced && entry.event) {
           const event: AlertEvent = { ...entry.event, active: false, clearedAt: now };

@@ -253,3 +253,107 @@ test('state() / restore() round-trips cooldown memory', () => {
   const fresh = engineWith([r.rule]);
   expect(raised(run(fresh, 61_000))).toHaveLength(1);
 });
+
+/** A rule whose result (candidates, or null for "cannot evaluate") and held keys the test sets before each call. */
+function holdingRule(id: string, timing: { dwellMs: number; cooldownMs: number }) {
+  let current: Candidate[] | null = [];
+  let held: string[] = [];
+  const rule: Rule = {
+    id,
+    provenance: 'bmw-check-control',
+    dwellMs: timing.dwellMs,
+    cooldownMs: timing.cooldownMs,
+    evaluate: (ctx) => {
+      for (const key of held) ctx.hold(key);
+      return current;
+    },
+  };
+  return {
+    rule,
+    set: (candidates: Candidate[] | null, hold: string[] = []) => { current = candidates; held = hold; },
+  };
+}
+
+test('a rule that cannot evaluate keeps its active alert; the same condition later is the same alert', () => {
+  const r = holdingRule('r', { dwellMs: 0, cooldownMs: 600_000 });
+  const engine = engineWith([r.rule]);
+  r.set([candidate('a', 'critical')]);
+  expect(run(engine, 0).map((e) => e.id)).toEqual(['r:a:0']);
+
+  r.set(null);
+  for (let t = 1000; t <= 3_600_000; t += 1000) expect(run(engine, t)).toEqual([]);
+  expect(engine.active().map((e) => e.id)).toEqual(['r:a:0']);
+
+  // Reported again long after the cooldown: still the same alert, no new event.
+  r.set([candidate('a', 'critical')]);
+  expect(run(engine, 3_601_000)).toEqual([]);
+  expect(engine.active().map((e) => e.id)).toEqual(['r:a:0']);
+  expect(engine.history()).toHaveLength(1);
+  expect(engine.state().keys).toHaveLength(1);
+
+  // Evaluated and gone: cleared, with the original id.
+  r.set([]);
+  const cleared = run(engine, 3_602_000);
+  expect(cleared).toEqual([expect.objectContaining({ id: 'r:a:0', active: false, clearedAt: 3_602_000 })]);
+  expect(engine.active()).toEqual([]);
+});
+
+test('a rule that cannot evaluate from the start raises nothing and holds nothing', () => {
+  const r = holdingRule('r', { dwellMs: 0, cooldownMs: 600_000 });
+  const engine = engineWith([r.rule]);
+  r.set(null, ['a', 'b']);
+  for (let t = 0; t <= 60_000; t += 1000) expect(run(engine, t)).toEqual([]);
+  expect(engine.active()).toEqual([]);
+  expect(engine.history()).toEqual([]);
+  expect(engine.state().keys).toEqual([]);
+});
+
+test('a pending key neither raises nor restarts its dwell while its rule cannot evaluate', () => {
+  const r = holdingRule('r', { dwellMs: 5000, cooldownMs: 600_000 });
+  const engine = engineWith([r.rule]);
+  r.set([candidate('a')]);
+  expect(run(engine, 0)).toEqual([]);
+  expect(run(engine, 1000)).toEqual([]);
+  expect(run(engine, 2000)).toEqual([]); // 2 s of dwell so far
+
+  r.set(null);
+  for (let t = 3000; t <= 60_000; t += 1000) expect(run(engine, t)).toEqual([]);
+  expect(engine.state().keys).toEqual([expect.objectContaining({ dedupKey: 'a', active: false })]);
+
+  // Seen again: the dwell continues from 2 s (+1 s for this call), it neither completed nor restarted.
+  r.set([candidate('a')]);
+  expect(run(engine, 61_000)).toEqual([]);
+  expect(run(engine, 62_000)).toEqual([]);
+  expect(run(engine, 63_000).map((e) => e.id)).toEqual(['r:a:63000']);
+});
+
+test('a held key survives while the other keys of its rule are evaluated and cleared', () => {
+  const r = holdingRule('r', { dwellMs: 0, cooldownMs: 600_000 });
+  const engine = engineWith([r.rule]);
+  r.set([candidate('a'), candidate('b')]);
+  expect(run(engine, 0)).toHaveLength(2);
+
+  r.set([], ['a']);
+  const cleared = run(engine, 1000);
+  expect(cleared.map((e) => [e.dedupKey, e.active])).toEqual([['b', false]]);
+  expect(engine.active().map((e) => e.dedupKey)).toEqual(['a']);
+  for (let t = 2000; t <= 1_200_000; t += 1000) expect(run(engine, t)).toEqual([]);
+  expect(engine.active().map((e) => e.id)).toEqual(['r:a:0']);
+  expect(engine.history()).toHaveLength(2);
+  expect(engine.state().keys.map((k) => k.dedupKey)).toEqual(['a']); // b's cooldown memory is gone
+
+  r.set([]);
+  expect(run(engine, 1_201_000)).toEqual([expect.objectContaining({ id: 'r:a:0', active: false })]);
+});
+
+test('a rule cannot hold a key it does not own, and a candidate beats a hold of the same key', () => {
+  const r = holdingRule('r', { dwellMs: 0, cooldownMs: 600_000 });
+  const s = holdingRule('s', { dwellMs: 0, cooldownMs: 600_000 });
+  const engine = engineWith([r.rule, s.rule]);
+  r.set([candidate('a')]);
+  s.set([candidate('b')], ['b']);
+  expect(run(engine, 0)).toHaveLength(2);
+  r.set([]);
+  s.set([], ['a']);
+  expect(run(engine, 1000).map((e) => [e.dedupKey, e.active])).toEqual([['a', false], ['b', false]]);
+});

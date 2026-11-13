@@ -121,22 +121,33 @@ export class VehicleHub {
     if (!engine) return;
     const limits = this.options.settings.get().ownerLimits;
     for (const event of engine.evaluate(snapshot, now, limits)) this.record(event);
-    this.reconcile(engine.active(), now);
+    this.reconcile(engine, now);
   }
 
   /**
    * Makes the store agree with the engine for the two transitions the engine does not return as events:
    * a key active again inside its cooldown (re-opened under the id of its last raise), and a key that ends
    * without an announced event (a restored key whose condition is gone, or such a re-opened key).
+   * A restored key the engine still holds as active has no event in engine.active() until a candidate
+   * rebuilds it; while its rule cannot evaluate (unknown is not gone) its stored alert is left active.
    */
-  private reconcile(active: AlertEvent[], now: number): void {
+  private reconcile(engine: EventEngine, now: number): void {
     const activeIds = new Set<string>();
-    for (const alert of active) {
+    for (const alert of engine.active()) {
       activeIds.add(alert.id);
       if (!this.storedActive.has(alert.id)) this.record({ ...alert, active: true, clearedAt: null });
     }
+    if (this.storedActive.size === activeIds.size) return;   // every stored alert is in engine.active()
+    const held = new Map<string, { ruleId: string; lastRaisedAt: number | null }>();
+    for (const key of engine.state().keys) {
+      if (key.active) held.set(key.dedupKey, { ruleId: key.ruleId, lastRaisedAt: key.lastRaisedAt });
+    }
     for (const alert of Array.from(this.storedActive.values())) {
-      if (!activeIds.has(alert.id)) this.record({ ...alert, active: false, clearedAt: now });
+      if (activeIds.has(alert.id)) continue;
+      const key = held.get(alert.dedupKey);
+      // The same raise (engine id `${ruleId}:${dedupKey}:${at}`, at = lastRaisedAt) is still active in the engine.
+      if (key !== undefined && key.ruleId === alert.ruleId && key.lastRaisedAt === alert.at) continue;
+      this.record({ ...alert, active: false, clearedAt: now });
     }
   }
 

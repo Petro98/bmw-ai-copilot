@@ -6,6 +6,9 @@ import { TEN_MINUTES_MS } from './check-control';
  * Limits the owner typed in himself. There is no built-in threshold: a limit that is null (or not a finite
  * number) makes its check inert. The only numbers here are the exit margins (hysteresis) the plan gives
  * (plan 1, Task 5): an active alert stays until the value is back past the limit by that margin.
+ *
+ * Unknown is not gone: when the reading a set limit compares is unavailable (or not in the expected unit), the
+ * key is held (ctx.hold) and its alert stays exactly as it is. A limit the owner removed clears its alert.
  */
 
 /** Exit margin of the temperature limits, in °C. */
@@ -52,9 +55,12 @@ function maxTemperature(
 ): Candidate | null {
   const limit = limitOf(ctx.limits, name);
   if (limit === null) return null;
-  const value = valueIn(reading, '°C');
-  if (value === null) return null;
   const dedupKey = `limit:${name}`;
+  const value = valueIn(reading, '°C');
+  if (value === null) {
+    ctx.hold(dedupKey);
+    return null;
+  }
   const over = ctx.isActive(dedupKey) ? value > limit - TEMPERATURE_EXIT_MARGIN_C : value > limit;
   if (!over) return null;
   return {
@@ -68,9 +74,12 @@ function maxTemperature(
 function minBattery(ctx: RuleContext): Candidate | null {
   const limit = limitOf(ctx.limits, 'battery12vMinPercent');
   if (limit === null) return null;
-  const value = valueIn(ctx.snapshot.battery12vCharge, '%');
-  if (value === null) return null;
   const dedupKey = 'limit:battery12vMinPercent';
+  const value = valueIn(ctx.snapshot.battery12vCharge, '%');
+  if (value === null) {
+    ctx.hold(dedupKey);
+    return null;
+  }
   const under = ctx.isActive(dedupKey) ? value < limit + BATTERY_EXIT_MARGIN_PERCENT : value < limit;
   if (!under) return null;
   return {
@@ -81,16 +90,19 @@ function minBattery(ctx: RuleContext): Candidate | null {
   };
 }
 
-/** Deviation of each wheel from the car's own target; only when both are available in bar. */
+/** Deviation of each wheel from the car's own target; only when both are available in bar, else the wheel is held. */
 function tyreDeviation(ctx: RuleContext): Candidate[] {
   const limit = limitOf(ctx.limits, 'tyrePressureDeviationBar');
   if (limit === null) return [];
   const out: Candidate[] = [];
   for (const { wheel, uk } of WHEELS) {
+    const dedupKey = `limit:tyre:${wheel}`;
     const pressure = valueIn(ctx.snapshot.tyrePressure[wheel], 'bar');
     const target = valueIn(ctx.snapshot.tyrePressureTarget[wheel], 'bar');
-    if (pressure === null || target === null) continue;
-    const dedupKey = `limit:tyre:${wheel}`;
+    if (pressure === null || target === null) {
+      ctx.hold(dedupKey);
+      continue;
+    }
     const deviation = Math.abs(pressure - target);
     const off = ctx.isActive(dedupKey) ? deviation > limit - TYRE_EXIT_MARGIN_BAR : deviation > limit;
     if (!off) continue;
