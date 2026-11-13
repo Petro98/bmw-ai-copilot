@@ -2,7 +2,8 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { available, emptySnapshot, VehicleCondition, VehicleSnapshot } from '@copilot/vehicle-core';
+import { available, emptySnapshot, type Clock, VehicleCondition, VehicleSnapshot } from '@copilot/vehicle-core';
+import type { FullTimerApi } from '../platform';
 import {
   assertReadOnly,
   DiagBlockedError,
@@ -33,6 +34,20 @@ function refused(target: number, request: ReadonlyArray<number>): boolean {
   }
 }
 
+/** The global clock and timers, which vi.useFakeTimers() replaces: handed to the gate by injection. */
+function globalClock(): Clock {
+  return { now: () => Date.now() };
+}
+
+function globalTimers(): FullTimerApi {
+  return {
+    setTimeout: (fn, ms) => setTimeout(fn, ms),
+    clearTimeout: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+    setInterval: (fn, ms) => setInterval(fn, ms),
+    clearInterval: (h) => clearInterval(h as ReturnType<typeof setInterval>),
+  };
+}
+
 function gate(options: { enabled?: () => boolean; snapshot?: () => VehicleSnapshot } = {}) {
   const sent: Array<{ target: number; request: number[] }> = [];
   const transport = {
@@ -45,6 +60,8 @@ function gate(options: { enabled?: () => boolean; snapshot?: () => VehicleSnapsh
     enabled: options.enabled || (() => true),
     snapshot: options.snapshot || (() => snapshotWith('driving', 800)),
     transport,
+    clock: globalClock(),
+    timers: globalTimers(),
   });
   return { g, transport, sent };
 }
@@ -154,20 +171,22 @@ test('refuses a physical request addressed to 0xDF and an empty request', () => 
 
 test('diagAllowedNow follows the vehicle condition and the cranking window', () => {
   expect(diagAllowedNow(snapshotWith(null))).toEqual({ allowed: false, reason: 'condition-unknown' });
-  for (const c of ['parked', 'standby', 'starting', 'stopping'] as const)
+  // telemetry.md F9: condition 5 or below counts as asleep, and every request keeps the car awake
+  for (const c of ['parked', 'standby', 'living', 'starting', 'stopping'] as const)
     expect(diagAllowedNow(snapshotWith(c))).toEqual({ allowed: false, reason: c });
-  for (const c of ['living', 'ignition-on', 'driving'] as const)
+  for (const c of ['ignition-on', 'driving'] as const)
     expect(diagAllowedNow(snapshotWith(c))).toEqual({ allowed: true, reason: null });
   for (const rpm of [1, 200, 449, 449.9]) expect(diagAllowedNow(snapshotWith('driving', rpm))).toEqual({ allowed: false, reason: 'cranking' });
   for (const rpm of [0, 450, 800]) expect(diagAllowedNow(snapshotWith('ignition-on', rpm)).allowed).toBe(true);
 });
 
-test('is blocked while disabled, while parked, while starting or stopping and while cranking', async () => {
+test('is blocked while disabled, while parked or living, while starting or stopping and while cranking', async () => {
   const cases: Array<[() => boolean, () => VehicleSnapshot, string]> = [
     [() => false, () => snapshotWith('driving', 800), 'disabled'],
     [() => 'yes' as unknown as boolean, () => snapshotWith('driving', 800), 'disabled'],
     [() => { throw new Error('settings'); }, () => snapshotWith('driving', 800), 'disabled'],
     [() => true, () => snapshotWith('parked'), 'parked'],
+    [() => true, () => snapshotWith('living'), 'living'],
     [() => true, () => snapshotWith('starting'), 'starting'],
     [() => true, () => snapshotWith('stopping'), 'stopping'],
     [() => true, () => snapshotWith('ignition-on', 300), 'cranking'],
@@ -200,7 +219,7 @@ test('the gate re-checks before sending: a queued request is dropped once the ca
       const transport = {
         send: vi.fn(() => new Promise<number[]>((resolve) => { release = () => resolve([0x62]); })),
       };
-      const g = new ReadOnlyDiagGate({ enabled: () => on, snapshot: () => snapshotWith(condition), transport });
+      const g = new ReadOnlyDiagGate({ enabled: () => on, snapshot: () => snapshotWith(condition), transport, clock: globalClock(), timers: globalTimers() });
       const first = g.send(UNIT, [0x22, 0x44, 0x02]);
       const second = g.send(UNIT, [0x22, 0x44, 0x03]).then(() => null, (e: unknown) => e);
       const third = g.send(UNIT, [0x22, 0x44, 0x04]).then(() => null, (e: unknown) => e);
@@ -322,7 +341,7 @@ describe('pacing', () => {
         });
       },
     };
-    const g = new ReadOnlyDiagGate({ enabled: () => true, snapshot: () => snapshotWith('driving', 900), transport });
+    const g = new ReadOnlyDiagGate({ enabled: () => true, snapshot: () => snapshotWith('driving', 900), transport, clock: globalClock(), timers: globalTimers() });
     const all = Promise.all([0, 1, 2, 3, 4].map((i) => g.send(UNIT, [0x22, 0x44, i])));
     await vi.advanceTimersByTimeAsync(1000);
     await expect(all).resolves.toHaveLength(5);
@@ -340,7 +359,7 @@ describe('pacing', () => {
         return n++ === 0 ? Promise.reject(new Error('busy')) : Promise.resolve([0x62]);
       },
     };
-    const g = new ReadOnlyDiagGate({ enabled: () => true, snapshot: () => snapshotWith('driving'), transport });
+    const g = new ReadOnlyDiagGate({ enabled: () => true, snapshot: () => snapshotWith('driving'), transport, clock: globalClock(), timers: globalTimers() });
     const a = g.send(UNIT, [0x22, 0x44, 0x02]).then(() => 'ok', () => 'failed');
     const b = g.send(UNIT, [0x22, 0x44, 0x03]);
     await vi.advanceTimersByTimeAsync(100);
@@ -351,13 +370,79 @@ describe('pacing', () => {
 
   test('the queue is bounded', async () => {
     const transport = { send: vi.fn(() => new Promise<number[]>(() => {})) };   // never answers
-    const g = new ReadOnlyDiagGate({ enabled: () => true, snapshot: () => snapshotWith('driving'), transport });
+    const g = new ReadOnlyDiagGate({ enabled: () => true, snapshot: () => snapshotWith('driving'), transport, clock: globalClock(), timers: globalTimers() });
     const outcomes: unknown[] = new Array(20).fill('pending');
     for (let i = 0; i < 20; i++) g.send(UNIT, [0x22, 0x44, i]).then((v) => { outcomes[i] = v; }, (e: unknown) => { outcomes[i] = e; });
     await vi.advanceTimersByTimeAsync(1000);
     expect(transport.send).toHaveBeenCalledTimes(1);
     for (let i = 0; i < MAX_PENDING_REQUESTS; i++) expect(outcomes[i]).toBe('pending');
     for (let i = MAX_PENDING_REQUESTS; i < 20; i++) expect((outcomes[i] as DiagBlockedError).reason).toBe('queue-full');
+  });
+});
+
+describe('injected clock and timers', () => {
+  function readTransport() {
+    return { send: vi.fn<(target: number, request: number[]) => Promise<number[]>>(() => Promise.resolve([0x62])) };
+  }
+  const base = () => ({ enabled: () => true, snapshot: () => snapshotWith('driving', 800) });
+
+  test('without a clock or without timers the gate refuses to send at all', async () => {
+    const clock = { now: () => 0 };
+    const timers = { setTimeout: vi.fn(), clearTimeout: vi.fn(), setInterval: vi.fn(), clearInterval: vi.fn() };
+    const variants = [{}, { clock }, { timers }, { clock: null, timers: null }, { clock: {}, timers: {} }];
+    for (const extra of variants) {
+      const transport = readTransport();
+      const g = new ReadOnlyDiagGate({ ...base(), transport, ...(extra as object) });
+      const err = await g.send(UNIT, [0x22, 0xf1, 0x90]).then(() => null, (e: unknown) => e);
+      expect(err, JSON.stringify(Object.keys(extra))).toBeInstanceOf(DiagBlockedError);
+      expect((err as DiagBlockedError).reason).toBe('no-timers');
+      expect(transport.send).not.toHaveBeenCalled();
+    }
+    expect(timers.setTimeout).not.toHaveBeenCalled();
+  });
+
+  test('paces with the injected clock and timers, never the global ones', async () => {
+    let t = 1_000_000;
+    const clock = { now: vi.fn(() => t) };
+    const due: Array<{ fn: () => void; ms: number }> = [];
+    const timers: FullTimerApi = {
+      setTimeout: vi.fn((fn: () => void, ms: number) => { due.push({ fn, ms }); return due.length; }),
+      clearTimeout: vi.fn(),
+      setInterval: vi.fn(),
+      clearInterval: vi.fn(),
+    };
+    const globalSetTimeout = vi.spyOn(globalThis, 'setTimeout');
+    try {
+      const transport = readTransport();
+      const g = new ReadOnlyDiagGate({ ...base(), transport, clock, timers });
+      const first = g.send(UNIT, [0x22, 0x44, 0x02]);
+      const second = g.send(UNIT, [0x22, 0x44, 0x03]);
+      await expect(first).resolves.toEqual([0x62]);
+      await Promise.resolve();
+      await Promise.resolve();
+      // the second waits on the injected timer for the full gap
+      expect(transport.send).toHaveBeenCalledTimes(1);
+      expect(due.map((d) => d.ms)).toEqual([MIN_REQUEST_GAP_MS]);
+      t += MIN_REQUEST_GAP_MS;
+      due.shift()!.fn();
+      await expect(second).resolves.toEqual([0x62]);
+      expect(transport.send).toHaveBeenCalledTimes(2);
+      expect(clock.now).toHaveBeenCalled();
+      expect(globalSetTimeout).not.toHaveBeenCalled();
+    } finally {
+      globalSetTimeout.mockRestore();
+    }
+  });
+
+  test('a request sent after the gap has passed on the injected clock does not wait', async () => {
+    let t = 0;
+    const timers: FullTimerApi = { setTimeout: vi.fn(), clearTimeout: vi.fn(), setInterval: vi.fn(), clearInterval: vi.fn() };
+    const transport = readTransport();
+    const g = new ReadOnlyDiagGate({ ...base(), transport, clock: { now: () => t }, timers });
+    await g.send(UNIT, [0x22, 0x44, 0x02]);
+    t += MIN_REQUEST_GAP_MS;
+    await expect(g.send(UNIT, [0x22, 0x44, 0x03])).resolves.toEqual([0x62]);
+    expect(timers.setTimeout).not.toHaveBeenCalled();
   });
 });
 
@@ -379,8 +464,13 @@ test('the gate has no caller and reaches no transport of its own', () => {
     expect(text, file).not.toMatch(/readonly-gate|ReadOnlyDiagGate|assertReadOnly/);
   }
   const gateSrc = readFileSync(own, 'utf8');
-  // only a type-only import of the shared vehicle contract; no require, no kit, no diag transport
+  // only type-only imports (the shared vehicle contract, the platform's timer type); no require, no kit, no diag transport
   const imports = gateSrc.match(/^\s*import\b.*$/gm) || [];
-  expect(imports).toEqual(["import type { VehicleSnapshot } from '@copilot/vehicle-core';"]);
+  expect(imports).toEqual([
+    "import type { Clock, VehicleSnapshot } from '@copilot/vehicle-core';",
+    "import type { FullTimerApi } from '../platform';",
+  ]);
+  // no global timer or clock: time and timers come in through the options
+  expect(gateSrc).not.toMatch(/(^|[^.\w])(setTimeout|setInterval|setImmediate)\s*\(|Date\.now/m);
   expect(gateSrc).not.toMatch(/\brequire\s*\(|\bimport\s*\(|InternalTasu|sendTasuRequest|someip|buildProxy/);
 });

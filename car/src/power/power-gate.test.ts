@@ -145,7 +145,7 @@ describe('PowerGate', () => {
     expect(calls).toEqual([['awake', 'asleep']]);
   });
 
-  test('a fresh tyre reading counts as activity too', () => {
+  test('a polled tyre reading re-stamped later is not activity', () => {
     const clock = manualClock(0);
     const gate = new PowerGate({ clock });
     const s = noCondition(0, null);
@@ -153,8 +153,49 @@ describe('PowerGate', () => {
     clock.t = IDLE_FALLBACK_MS - 1_000;
     s.tyrePressure.rearLeft = available(2.3, 'bar', 'polled-signal', clock.t);
     expect(gate.update(s)).toBe('awake');
-    clock.t = IDLE_FALLBACK_MS + 1_000;
-    expect(gate.update(s)).toBe('awake');
+    clock.t = IDLE_FALLBACK_MS;
+    expect(gate.update(s)).toBe('asleep');
+  });
+
+  test('condition unavailable and an unchanged polled value re-stamped every 10 s → asleep after the fallback', () => {
+    const clock = manualClock(0);
+    const gate = new PowerGate({ clock });
+    const calls = recorder(gate);
+    let state: PowerState = 'awake';
+    for (let t = 0; t <= 16 * 60_000; t += 10_000) {
+      clock.t = t;
+      const s = noCondition(t, null);
+      s.fuelLevel = available(42, '%', 'polled-signal', t);          // same value, new stamp, every poll
+      s.tyrePressure.frontLeft = available(2.4, 'bar', 'polled-signal', t);
+      state = gate.update(s);
+      if (t < IDLE_FALLBACK_MS) expect(state, String(t)).toBe('awake');
+    }
+    expect(state).toBe('asleep');
+    expect(calls).toEqual([['asleep', 'awake']]);
+  });
+
+  test('a diagnostic reading re-stamped later is not activity either', () => {
+    const clock = manualClock(0);
+    const gate = new PowerGate({ clock });
+    let state: PowerState = 'awake';
+    for (let t = 0; t <= IDLE_FALLBACK_MS; t += 10_000) {
+      clock.t = t;
+      const s = noCondition(t, null);
+      s.coolantTemp = available(90, '°C', 'diagnostic-read', t);
+      state = gate.update(s);
+    }
+    expect(state).toBe('asleep');
+  });
+
+  test('condition unavailable and a passive reading advancing → stays awake', () => {
+    const clock = manualClock(0);
+    const gate = new PowerGate({ clock });
+    const calls = recorder(gate);
+    for (let t = 0; t <= 60 * 60_000; t += 10_000) {
+      clock.t = t;
+      expect(gate.update(noCondition(t, 0, t)), String(t)).toBe('awake');
+    }
+    expect(calls).toEqual([]);
   });
 
   test('a clock jumping backwards does not put the gate to sleep or throw', () => {

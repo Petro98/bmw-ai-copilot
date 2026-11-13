@@ -24,7 +24,8 @@
  * tester present (3E), DTC settings (85), OBD 04 (clear) and 08 (control) and every other service are
  * refused, to one unit and to all units.
  */
-import type { VehicleSnapshot } from '@copilot/vehicle-core';
+import type { Clock, VehicleSnapshot } from '@copilot/vehicle-core';
+import type { FullTimerApi } from '../platform';
 
 export class DiagBlockedError extends Error {
   constructor(readonly reason: string) {
@@ -115,14 +116,15 @@ export function assertReadOnly(target: number, request: ReadonlyArray<number>): 
 }
 
 /**
- * Whether the car is awake and steady enough for a read (telemetry.md F9, plan Task 5): not while the
- * condition is unknown, parked, standby, starting or stopping, and not while the engine is cranking.
+ * Whether the car is awake and steady enough for a read (telemetry.md F9, plan Task 5): only with the
+ * ignition on or while driving. Not while the condition is unknown, parked, standby, starting or stopping,
+ * and not while living either: F9 records that prior art treats condition 5 or below as asleep and that
+ * every request keeps the car awake. Not while the engine is cranking.
  */
 export function diagAllowedNow(snapshot: VehicleSnapshot): { allowed: boolean; reason: string | null } {
   const condition = snapshot && snapshot.condition;
   if (!condition || condition.available !== true) return { allowed: false, reason: 'condition-unknown' };
   switch (condition.value) {
-    case 'living':
     case 'ignition-on':
     case 'driving':
       break;
@@ -142,24 +144,33 @@ export interface ReadOnlyDiagGateOptions {
   enabled: () => boolean;
   snapshot: () => VehicleSnapshot;
   transport: DiagTransport;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => { setTimeout(resolve, ms); });
+  /** Head-unit time, injected. Without it (or without `timers`) the gate refuses every request. */
+  clock?: Clock;
+  /** Head-unit timers, injected; only setTimeout is used, for the gap between requests. */
+  timers?: FullTimerApi;
 }
 
 function noop(): void {}
 
 export class ReadOnlyDiagGate {
   /**
-   * enabled() false → DiagBlockedError('disabled'); then diagAllowedNow; then assertReadOnly. One request
-   * at a time, at least MIN_REQUEST_GAP_MS apart; the checks run again just before a queued request goes.
+   * No injected clock or timers → DiagBlockedError('no-timers'), always. Otherwise enabled() false →
+   * DiagBlockedError('disabled'); then diagAllowedNow; then assertReadOnly. One request at a time, at least
+   * MIN_REQUEST_GAP_MS apart on the injected clock and timers; the checks run again just before a queued
+   * request goes.
    */
   readonly send: (target: number, request: number[]) => Promise<number[]>;
 
   constructor(options: ReadOnlyDiagGateOptions) {
     // The transport lives only in this closure: nothing outside send() can reach it.
     const transport = options.transport;
+    const clock = options.clock;
+    const timers = options.timers;
+    if (!clock || typeof clock.now !== 'function' || !timers || typeof timers.setTimeout !== 'function') {
+      this.send = (): Promise<number[]> => Promise.reject(new DiagBlockedError('no-timers'));
+      return;
+    }
+    const sleep = (ms: number): Promise<void> => new Promise((resolve) => { timers.setTimeout(resolve, ms); });
     let pending = 0;
     let chain: Promise<unknown> = Promise.resolve();
     let nextAt = 0;
@@ -187,13 +198,13 @@ export class ReadOnlyDiagGate {
       const run = async (): Promise<number[]> => {
         try {
           // a clock jumping backwards never stretches the wait beyond one gap
-          const wait = Math.min(MIN_REQUEST_GAP_MS, Math.max(0, nextAt - Date.now()));
+          const wait = Math.min(MIN_REQUEST_GAP_MS, Math.max(0, nextAt - clock.now()));
           if (wait > 0) await sleep(wait);
           check(target, checked);
           try {
             return await transport.send(target, copyRequest(checked));
           } finally {
-            nextAt = Date.now() + MIN_REQUEST_GAP_MS;
+            nextAt = clock.now() + MIN_REQUEST_GAP_MS;
           }
         } finally {
           pending--;

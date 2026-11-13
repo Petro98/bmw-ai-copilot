@@ -48,9 +48,9 @@ export class PowerGate {
   private readonly idleFallbackMs: number;
   private current: PowerState = 'awake';
   private listeners: Listener[] = [];
-  /** The last `at` seen per reading path; a fixed set of keys, so bounded. */
+  /** The last `at` seen per passive reading path; a fixed set of keys, so bounded. */
   private lastAt: Record<string, number> = {};
-  /** Clock time at which a reading's `at` last changed (or the gate was created). */
+  /** Clock time at which a passive reading's `at` last changed (or the gate was created). */
   private lastActivityAt: number;
 
   constructor(options: { clock: Clock; idleFallbackMs?: number }) {
@@ -98,8 +98,11 @@ export class PowerGate {
   }
 
   /**
-   * True when any available reading carries an `at` different from the one last seen for it. "Different",
-   * not "later": after the clock moves back, a genuinely new reading is stamped earlier than the old one.
+   * True when any available passive reading carries an `at` different from the one last seen for it.
+   * Only `passive-signal` readings count as activity: polled readings (fuel, range, odometer, tyres) are
+   * re-stamped on every poll whether or not they changed, and diagnostic reads are requests we make, so
+   * neither says the car is doing anything. "Different", not "later": after the clock moves back, a
+   * genuinely new reading is stamped earlier than the old one.
    */
   private sawFreshReading(snapshot: VehicleSnapshot): boolean {
     let fresh = false;
@@ -121,7 +124,7 @@ export class PowerGate {
   }
 
   private note(path: string, reading: Reading<unknown> | undefined): boolean {
-    if (!reading || !reading.available) return false;
+    if (!reading || !reading.available || reading.source !== 'passive-signal') return false;
     if (this.lastAt[path] === reading.at) return false;
     this.lastAt[path] = reading.at;
     return true;
