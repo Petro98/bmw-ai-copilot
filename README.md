@@ -81,7 +81,10 @@ npm start
 ```
 
 Open «Налаштування» → «Демо-сценарій» and pick «Перегрів і повідомлення Check Control»: about a minute later the
-car's Check Control message appears on «Авто», and a topic chip on «Голос» streams an answer.
+car's Check Control message appears on «Авто», and a topic chip on «Голос» streams an answer. Everything here is
+demonstration data: a «ДЕМО-ДАНІ» strip stays under the top bar, the «Авто» heading starts with «ДЕМО-ДАНІ», and
+every prompt tells Claude the data is a simulated car, so its answers say so too. After you switch to another scenario, an alert it no longer reports
+stays in the list marked «ЗНЯТО О <time>», after the active ones.
 
 Production build of the backend (one bundled file, run with production dependencies only):
 
@@ -103,7 +106,7 @@ openssl rand -base64 32    # a second, different value: SESSION_SECRET=...
 docker compose up --build
 ```
 
-- Panel: http://localhost:8080 (nginx serves the build and proxies `/api` to the backend). It opens «Вхід» first:
+- Panel: http://localhost:8080 (nginx serves the build and proxies `/api` and `/car/v1` to the backend). It opens «Вхід» first:
   type the `OWNER_TOKEN` value once and the browser keeps the session for 30 days.
 - Backend: http://localhost:3000/api/health.
 
@@ -120,7 +123,13 @@ variable in `.env` is optional; inside the container `HOST`, `PORT` and `DATABAS
 - **Live mode**: set `ANTHROPIC_API_KEY` in `.env` (with the default `CLAUDE_MODE=auto` a key switches live mode on;
   `CLAUDE_MODE=live` without a key refuses to start; `CLAUDE_MODE=mock` never calls Claude). The model is
   `CLAUDE_MODEL` (default `claude-opus-5-5`). Spend is capped by `BUDGET_DAILY_USD`, `BUDGET_MONTHLY_USD` and
-  `RATE_LIMIT_PER_MINUTE`; a question over budget is refused with a Ukrainian message.
+  `RATE_LIMIT_PER_MINUTE`; a question over budget is refused with a Ukrainian message. An answer that is interrupted
+  or times out is counted by a conservative estimate. Each question in flight holds the price of `CLAUDE_MAX_TOKENS`
+  output tokens against both budgets until it ends ($0.32 at the defaults), so a question that overlaps another near
+  the budget's edge is refused with the budget message although the budget is not spent yet (with the default $1 a
+  day and `claude-opus-5-5`, a `CLAUDE_MAX_TOKENS` of 50000 or more lets only one question run at a time). The
+  budget is checked when a question starts, so the last question admitted can take the spend somewhat past a limit;
+  the spend limit of the Console workspace that holds the key is the hard outer cap.
 
 The API key is created in the **Claude Console** (platform.claude.com) under the organisation linked to your
 subscription: sign in there, open the organisation's API keys page, create a key, and put it only in `.env`. Never
@@ -131,25 +140,51 @@ never appears in an API response.
 
 - **Owner access.** Set `OWNER_TOKEN` (at least 24 characters, random) and `SESSION_SECRET` (at least 32
   characters) in `.env`. The panel then opens «Вхід» first; the token is typed once and the browser keeps an
-  `HttpOnly`, `Secure`, `SameSite=Strict` session cookie for 30 days (`DELETE /api/session` ends it, a new
-  `SESSION_SECRET` ends every session). Without `OWNER_TOKEN` the API is open, so the backend refuses to start unless
-  `HOST` is a loopback address; inside the Docker Compose container `HOST` is `0.0.0.0`, so Compose requires both
-  variables (see «Running with Docker Compose»). The cookie is `Secure`: serve the panel over HTTPS (browsers also accept it on
-  `http://localhost`).
-- **Lock-out.** Five wrong tokens from one address within a minute lock that address out for a minute. The address
-  is the TCP peer of the backend: behind a reverse proxy (nginx in Docker Compose included) every visitor shares the
-  proxy's address, so one person mistyping locks everyone out for that minute. `X-Forwarded-For` is not trusted.
+  `HttpOnly`, `Secure`, `SameSite=Strict` session cookie for 30 days («Налаштування» → «Вийти», which calls
+  `DELETE /api/session`, ends it and reopens «Вхід»; a new `SESSION_SECRET` ends every session). Without
+  `OWNER_TOKEN` the API is open, so the backend refuses to start unless `HOST` is a loopback address, and it answers
+  only requests whose `Host` header names this machine (`localhost`, `127.x.x.x` or `[::1]`, any port); any other
+  host name gets 400. The panel's dev server keeps `Host: localhost:4200`, so `npm start` works as described. Inside
+  the Docker Compose container `HOST` is `0.0.0.0`, so Compose requires both variables (see «Running with Docker
+  Compose»). The cookie is `Secure`: serve the panel over HTTPS (browsers also accept it on `http://localhost`).
+- **Lock-out.** Five wrong tokens from one address within a minute lock that address out for a minute, and while it
+  is locked even the correct token is refused. The address is the TCP peer of the backend: behind a reverse proxy
+  (nginx in Docker Compose included) every visitor shares the proxy's address. So anyone who can reach the sign-in
+  page can delay your sign-in by a minute at a time, as often as they repeat it, without knowing anything. The token
+  itself cannot be guessed this way (at least 24 random characters, five tries a minute), and a browser that is
+  already signed in, and the paired car, keep working. What to do: keep the panel off the public internet where you
+  can, for example reach it from the phone over a VPN such as Tailscale; the car still needs `/car/v1` at the
+  address it was given (docs/CAR_INSTALL.md, «Before you start»). `X-Forwarded-For` is not trusted on purpose: the
+  backend cannot tell a header your own proxy set from one a visitor forged, and a forged one would let every try
+  count as a new address and escape the lock-out.
 - **Pairing the car.** The head-unit app makes its own device id and secret on its first run and shows a QR code
   of `<panel address>/pair#d=<device id>&s=<secret>`. Scan it with the phone: the «Підʼєднати авто» page reads the
   fragment, removes it from the address bar at once, asks for the owner's sign-in if needed, and registers the
   device with a label. The backend keeps only a SHA-256 of the secret. «Налаштування» → «ПІДʼЄДНАНІ ПРИСТРОЇ»
-  lists the paired devices and «Відʼєднати» revokes one at once.
+  lists the paired devices; «Відʼєднати» asks once more («Підтвердити відʼєднання» or «Скасувати») and then revokes
+  the device at once. With the car as vehicle source, removing a device also clears every active alert the car had
+  reported (the backend cannot tell which device raised which); a car that is still installed reports its standing
+  alerts again on its next start.
 - **The car as vehicle source.** `VEHICLE_SOURCE=car` replaces the mock vehicle with what the paired car posts to
-  `/car/v1/*` (each request carries `Authorization: Bearer <device id>.<secret>`). The car evaluates the alert rules
-  itself, so the backend runs no rule engine then; the demo scenarios (`/api/mock/*`) answer 404, and «АВТО» in the
-  panel shows connected while the car has reported within the last three minutes. A car that went quiet leaves its
-  last readings visible with their real times, so they age. The `/car/v1` paths must reach the backend through
-  whatever serves the panel's address.
+  `/car/v1/*` (each request carries `Authorization: Bearer <device id>.<secret>`). Set it, together with
+  `OWNER_TOKEN` and `SESSION_SECRET` (see «Owner access»), before installing the car app: with the default `mock`,
+  the backend answers the car's snapshots, alerts, questions and dialog requests with an error naming
+  `VEHICLE_SOURCE=car`: the car's network mark turns to «НЕМАЄ МЕРЕЖІ», and a question tapped on the car's screen
+  ends with «Сервер відхилив запит». The car evaluates the alert
+  rules itself, so the backend runs no rule engine then; the demo scenarios (`/api/mock/*`) answer 404, and «АВТО» in
+  the panel shows connected while the car has reported within the last three minutes. A car that went quiet leaves
+  its last readings visible with their real times, so they age: «Авто» then heads them «ОСТАННІ ДАНІ · ОНОВЛЕНО …»
+  with the reason under it, and «Голос» leaves the driving layout once the last speed is older than two minutes.
+  With the mock source «АВТО» shows a dash instead, and the «ДЕМО-ДАНІ» strip says the readings and alerts are
+  simulated. The `/car/v1` paths must reach the backend through whatever serves the panel's address.
+- **Demo data and the car's data in one database.** The database remembers which vehicle source wrote it. Starting
+  with `VEHICLE_SOURCE=car` on a database that holds demo data discards the demo alerts, telemetry and engine state
+  by itself; paired devices, settings, spend and the dialog are kept, but earlier dialog turns are no longer given to
+  Claude as conversation history. Starting with the mock source on a database that holds the car's data is refused
+  with a message, because it would delete the car's telemetry and clear its alerts; set
+  `ALLOW_VEHICLE_SOURCE_RESET=1` for that one start only if you mean it. To run the demo next to real data, give the
+  demo its own `DATABASE_PATH`: run it with npm (`npm run dev -w @copilot/backend`, whose default database is
+  `apps/backend/data/copilot.sqlite`), not in the Compose container, where `DATABASE_PATH` is fixed.
 
 ## Tests and gates
 

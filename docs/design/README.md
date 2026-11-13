@@ -6,6 +6,8 @@ A quiet instrument for one driver. Two surfaces share this system: the app drawn
 - Say only what the car reported. A value the car did not send is shown as «Недоступно» with the reason under it, never as a dash, a zero or an estimate.
 - Every warning names where it comes from, as a tag set in `label`: «BMW CHECK CONTROL», «СЕРВІС BMW», «ПАМ'ЯТЬ ПОМИЛОК BMW», «ВАШ ЛІМІТ». A limit the owner typed in is always called the owner's, never the manufacturer's. «ПАМ'ЯТЬ ПОМИЛОК BMW» marks a fault code read from a control unit's fault memory; whether it is active now is stated with the code.
 - Every warning also names its severity as a word: «КРИТИЧНО» (critical), «ПОПЕРЕДЖЕННЯ» (warning), «ДО ВІДОМА» (information).
+- A warning the car no longer reports says so in words at the end of its tag line: «ЗНЯТО О 12:39», «ЗНЯТО ВЧОРА», «ЗНЯТО 9 ЛИСТОПАДА», or «ЗНЯТО» when the time is unknown; it is listed after the active ones.
+- Say how current the readings are. The phone's car page heads them «ЗАРАЗ · ОНОВЛЕНО О 12:41» only while the car is reporting; otherwise «ОСТАННІ ДАНІ · ОНОВЛЕНО ВЧОРА О 18:42» with the reason under it. Scripted demo data is always marked «ДЕМО-ДАНІ», with the line «Імітовані показники і сповіщення, а не дані вашого авто.»
 - Numbers carry their unit after a space: «92 °C», «452 км», «2,3 бар». Decimal comma. Use the units the car displays.
 - While the car is moving an answer is three lines at most, set in `answer-driving`. Standing, up to eight lines in `answer`.
 - The assistant advises and never commands the car: «перевірте при нагоді», not «зупиніться негайно», unless the car's own message says so.

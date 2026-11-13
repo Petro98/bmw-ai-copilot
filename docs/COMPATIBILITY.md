@@ -16,10 +16,10 @@ document. Everything else is under *Hypotheses*, even when the reports call it v
 
 ## The car
 
-X3 xDrive30i, model year 2021, North-American specification (to be confirmed by the owner).
-Head unit MGU (iDrive 7), firmware `P18_23w44.2-1-3`. The MGU Store was installed by a service
-station; the owner manages the car through the Store only and does not hold root's SSH key.
-Internet in the car comes from the owner's Android phone hotspot through the Store's uplink.
+BMW X3 xDrive30i, model year 2021 (to be confirmed by the owner); North-American specification
+assumed (H-1). Head unit MGU (iDrive 7), firmware `P18_23w44.2-1-3`. The MGU Store was installed
+by a service station; the owner manages the car through the Store only and does not hold root's
+SSH key. Internet in the car comes from the owner's Android phone hotspot through the Store's uplink.
 The vehicle identification number is never written in this repository.
 
 ## Sources
@@ -73,7 +73,9 @@ path, those lines. Paths in J are given as they are in the upstream repository.
 | Kit J states that apps share 1000 MiB of memory; iDrive Monitor alerts when the apps reach 1300 MB of their cap. (The two figures disagree; see hypothesis H-5.) | J kit runtime file `life.js` (header comment); J `apps/jap_sysmon/main.js:7-9` |
 | Every diagnostic request keeps the car awake: kit A's eDrive app reads only while driving plus 3 minutes, or 10 minutes after the user touched a page, "and the car can sleep". | A `apps/edrive/live.js:163-167` |
 | Kit A's Ambient config, a headless autostart app, treats vehicle condition `<= 3` as "parked and left" and falls back to 15 minutes without use when the car reports no state. | A `apps/ambient_config/main.js:44`, `:92`, `:102` |
-| The baseline manifest every kit A app gets grants `WakeUpOnDemand` (`registerParticipant`) and the NSM `RegisterShutdownClient` method. Our app never calls them. | A `kit/tools/build.py:61`, `:82` |
+| The baseline manifest every kit A app gets grants `WakeUpOnDemand` (`registerParticipant`) and the NSM `RegisterShutdownClient` method. | A `kit/tools/build.py:61`, `:82` |
+| The kit vendored here writes the same kind of baseline into our package's SOME/IP `manifest.json`: `PLATFORM_PROXIES` is copied into every manifest by `manifest_for`. Besides `"*"` (everything) on eleven interfaces (nine HMI, resource and use-case interfaces, the personalization `SessionManager` and the `OAPController`), the HMI's `UseCaseRegistry`, the read method `Provisioning.getValueJSON` and two read-only unit attributes (`Vehicle.statusNewCurrentUnitsStatusExt`, `EnvironmentalInformation.UnitBN2020`), it declares the wake-on-demand interfaces (`WakeUpOnDemand` `registerParticipant`/`unregisterParticipant`, `WodControl` `offerService`/`stopOfferingService`), the node-state consumer (`LifecycleRequestComplete`, `RegisterShutdownClient`, `UnRegisterShutdownClient`), other state-changing platform methods (`PrivacySettings` `addOrUpdateSetting`/`setDynamicAvailable`/`setDynamicEnable`, `Provisioning.setFilterForProvisioningData`, `PrivateEntryPoint` and `AppBookmarks` registration), the BMW account's identity attributes (`UserAccount` `firstName`, `gcid`, `id`, `name`, `type`) and `Lifecycle.powerStateDetailed`. | this repository, `car/kit/tools/build.py:38-71`, `:321-336` |
+| Neither the kit's runtime nor our code calls any of the wake-on-demand, node-state, state-changing, account or power interfaces listed above. The runtime uses BMW's SDK only through `OnlineApp` and the SDK's logger: `start`, `initialized`, `registerActive`/`registerInactive`, `registerHmiVisible`/`unregisterHmiVisible`, `getLastExecutedEntryPointUuid`, `startReason`, its events, and the RHMI application it creates (screen states, entry states, resources). A test checks that our code and the bundle never name `WakeUpOnDemand`, `WodControl` or `RegisterShutdownClient`. Whether BMW's SDK calls any of the declared interfaces inside our process is not known: the SDK is not in this repository, and the kit's extractor lists an `NsmProxy` module among its files (H-27). | this repository, `car/kit/runtime/mgu.js:23`, `:30`, `:145-249`, `:493-512`, `:660-664`, `:685-697`, `:736-740`; `car/kit/runtime/life.js:36`; `car/test/bundle.test.ts:45-47`; `car/kit/tools/extract_sdk.js:33` |
 
 ### 1.4 Signals: passive versus diagnostic
 
@@ -184,31 +186,40 @@ report under `.research/reports/` whose citation was not reopened for this docum
 
 **Car and platform**
 
-- **H-1. The car is an X3 xDrive30i, model year 2021, North-American specification, with a
+- **H-1. The car is a BMW X3 xDrive30i, model year 2021, North-American specification, with a
   2.0-litre four-cylinder turbo petrol engine (B46/B48 family), 8-speed automatic, all-wheel
   drive.** Derived from the owner's data (spec §4). Confirm: the owner checks the registration
-  papers; on the car, read `Vehicle2.statusVehiclePartType.typeEngine` passively (checklist).
+  papers. The engine type field (`Vehicle2.statusVehiclePartType.typeEngine`) is not declared by
+  this version of the app, so it is not read on the car (checklist B6); C1 identifies the engine
+  unit only after separate approval.
 - **H-2. Some apps run on Node 8.9.4 (2019 units), not 8.16.2.** Reports `lifecycle.md`,
-  `store.md` (D15), citing C's CI matrix. Confirm: the test app logs `process.version`.
+  `store.md` (D15), citing C's CI matrix. Confirm: the app's start line logs `process.version`
+  (checklist B2).
 - **H-3. An autostart app keeps receiving SOME/IP notifications with its screen closed and runs
   for hours.** Shipped precedents (Ambient config, iDrive Monitor) and kit comments. Kit A's
   headless path never calls `app.initialized()`; whether MainApp tolerates that over long runs is
-  unknown (report `lifecycle.md`). Confirm: minimal autostart test app, 60+ minutes, log lines.
+  unknown (report `lifecycle.md`). Confirm: the app (autostart) for 60+ minutes, log lines
+  (checklist B3).
 - **H-4. An autostart app on this car gets an RHMI application (screens, pop-ups) at boot, as
   kit J's iDrive Monitor assumes, rather than kit A's screenless path.** Kit J raises the pop-up
   from `start(ctx)`; kit A logs "no screens for this start" when the SDK created none. Which path
-  the owner's unit takes is not documented. Confirm: test app logs which path ran after a cold
-  start without the tile being touched; iDrive Monitor's "Test pop-up" after a head-unit restart.
+  the owner's unit takes is not documented. Confirm: after a cold start without the tile being
+  touched, the kit's `initialized (start reason …)` line, or its error line when the SDK created no
+  screens (checklist B2); iDrive Monitor's "Test pop-up" after a head-unit restart.
 - **H-5. The apps' shared memory cap is 1000 MiB** (kit J `life.js`), not the 1300 MB iDrive
   Monitor alerts on. Confirm: iDrive Monitor's "apps memory x of y MB" on the car.
 - **H-6. The unit of `cpuLimit`, and what happens when it or `maxDiskUsage` is exceeded, are
   unknown.** Report `footprint.md`. Confirm: only by measurement; we stay at `cpuLimit` 30,
   `memoryKB` 131072.
 - **H-7. Tapping the tile of a running autostart app may start a fresh process.** Report
-  `lifecycle.md`. Confirm: run tag in the test app's log before and after a tap.
+  `lifecycle.md`. Confirm: a new start line in the app's log after a tap (checklist B4).
 - **H-8. A merely running Node process does not delay head-unit sleep; how long the unit stays up
   after locking is unknown.** No measurement exists in any repository or tracker (reports
-  `footprint.md`, `issues.md`). Confirm: overnight shutdown time and 12 V with and without the app.
+  `footprint.md`, `issues.md`). The app stays registered ACTIVE with MainApp for its whole life,
+  parked included (`ctx.background('monitor', true)`, as iDrive Monitor does: this repository
+  `car/src/app.ts:857`, `car/kit/runtime/life.js:27`); whether that changes when the unit sleeps is
+  part of this hypothesis. Confirm: overnight shutdown time and 12 V with and without the app
+  (checklist B16).
 - **H-9. The `app-privacy` patch covers this unit's MainApp version.** It covers iDrive 7 MainApp
   8.3.2, 8.2.10, 8.1.1, 6.5.5 (report `store.md` D12, D15), and firmware `P18_23w44.2-1-3` was seen
   paired with MainApp 8.3.2 in a Store issue. Confirm: Store status shows the patch applied.
@@ -217,10 +228,13 @@ report under `.research/reports/` whose citation was not reopened for this docum
 
 - **H-10. Our pop-up shows over navigation or Android Auto, and BMW's own messages still win.**
   iDrive Monitor's pop-up is the only precedent; it was not observed over other screens in any
-  source. Confirm: car checks 3 and 13.
+  source. Confirm: checklist A6 and B11.
 - **H-11. BMW's pop-up widget and RHMI string slots render Ukrainian.** The HMI has a Ukrainian
   display language (report `audio.md` AUD-08), but nobody has shown Cyrillic in an app pop-up.
-  Confirm: test pop-up with `і ї є ґ`; Plan 2 keeps a Latin transliteration switch as fallback.
+  Confirm: checklist B11 and B12. The test pop-up «Тестове сповіщення Copilot» shows `і`, and a
+  pop-up from the car's own message starts «Авто повідомляє:», which shows `є`; `ї` and `ґ` appear
+  in a pop-up only if a text the car sends contains them. The «Сповіщення латиницею» switch is the
+  fallback.
 - **H-12. The drawn screen needs the Store's GPU renderer with touch routing for tappable
   targets; the controller gate is not needed.** Report `ui.md` F8. Confirm: renderer listed in the
   Store; tapping a drawn target in an existing app works.
@@ -230,14 +244,19 @@ report under `.research/reports/` whose citation was not reopened for this docum
 - **H-13. Which catalogue signals this G01 actually sends, and how often.** No G01 signal
   catalogue is published; kit A was developed on the owner's firmware family (report
   `telemetry.md` F14). `statusBattery2` is missing on some firmware; some cars never send
-  `statusGearboxDrive`; TPMS and KombiIF may never notify. Confirm: car check 8.
+  `statusGearboxDrive`; TPMS and KombiIF may never notify. Confirm: which signals exist, from the
+  kit's "this unit has no …" lines and the «Недоступно» tiles (checklist B6). How often they
+  notify is not measured by this version of the app (B8).
 - **H-14. Scalings are right for this car.** Kit A calls them "BMW's own (M Laptimer
   TypeConverters)"; the tyre pressure unit follows the car's display unit, and a
   North-American car may report psi, °F and miles. Behaviour in miles is unknown. Confirm:
   compare each value with the cluster in the car's own units.
 - **H-15. Check Control `cCColor` values, text language and timing versus the cluster.** None is
-  documented (report `telemetry.md` F13). The design maps red → critical, yellow → warning, other →
-  info, unknown → warning (spec §7). Confirm: car check 10.
+  documented (report `telemetry.md` F13). The app maps red → critical, yellow or orange → warning,
+  green or white → info (the reference's own Check Control colour table, A
+  `apps/dtc_scanner/main.js:423`), and anything else, a wire number included, → warning (this
+  repository `car/src/provider/raw-decoders.ts:358-371`). Confirm: car check B10, from what the
+  СПОВІЩЕННЯ tab and the pop-up show; the raw colour values are not logged by this version.
 - **H-16. The engine unit answers the diagnostic identifiers in kit A's candidate tables
   (`F442`, `F40F`, `580B`, `5813`, `4402`).** The tables were made for the Bosch MG1 family
   (B38/B48/B58) (report `telemetry.md` F4). Confirm: only after separate approval (checklist
@@ -251,11 +270,12 @@ report under `.research/reports/` whose citation was not reopened for this docum
 - **H-18. Real uplink behaviour on this car**: time to "Online" after ignition-on, rejoin after
   sleep, audio skips with wireless Android Auto (several users report skips with wireless
   CarPlay: `idrive7-apps` issues 79 and 94, `mgu-store` issue 271, per report `issues.md`).
-  Confirm: car check 4.
+  Confirm: checklist A7 and A8.
 - **H-19. Node 8's root store validates `api.anthropic.com` / our backend's certificate.** A live
   probe on 2026-11-13 saw a chain through GTS Root R4 cross-signed by GlobalSign Root CA until
   2028-01-28 (report `claudeapi.md`). The car app talks only to the owner's backend, whose
-  certificate is the owner's choice. Confirm: TLS handshake from the car (check 12).
+  certificate is the owner's choice. Confirm: TLS handshake from the car (checklist B14, with the
+  head-unit clock from A4).
 
 **Licences and ecosystem**
 
@@ -289,6 +309,15 @@ report under `.research/reports/` whose citation was not reopened for this docum
 - **H-26. Which microphone Android uses while Android Auto is active, and how the car switches
   between media and call audio during capture.** Report `voice.md` (inferred). Confirm: in the car.
 
+**Package manifest**
+
+- **H-27. What the platform proxies the kit declares in our package manifest (1.3) allow on this
+  unit, and whether the app starts without them, are not known.** Neither the kit's runtime nor our
+  code calls them. The kit's build calls them "Platform proxies every OAP app needs (same set BMW's
+  apps declare)" (this repository `car/kit/tools/build.py:37`), so removing them may break the
+  app's start; what BMW's SDK does with them inside our process is also not known. Confirm:
+  checklist B18, read with B5 and B16; ask the Store's author or the service station.
+
 ---
 
 ## 3. Not possible or excluded
@@ -297,7 +326,7 @@ report under `.research/reports/` whose citation was not reopened for this docum
 |---|---|---|
 | **Cabin microphone** | Not possible with any known interface; excluded. | No project captures it: a search of A, B, C and related repositories found no capture code; the microphones reach the head unit as audio streams handled by BMW's audio router, and Moonride lists "no microphone" as a limit (report `audio.md` AUD-09, `issues.md` Q5). |
 | **BMW speech engine (TTS or recognition)** | No interface known; excluded. | The SDK API recovered by kit A's extractor lists no speech or audio module, and no repository or issue uses one (report `audio.md` AUD-07). Ukrainian speech support on the unit is unknown. |
-| **Taking over the steering-wheel voice button** | Excluded. | Apps see the voice button "but the HMI keeps acting on them too" (A `README.md:954-957`). Suppressing BMW's assistant would require hooking the HMI, which is interference. The button may be *observed* read-only (checklist B). |
+| **Taking over the steering-wheel voice button** | Excluded. | Apps see the voice button "but the HMI keeps acting on them too" (A `README.md:954-957`). Suppressing BMW's assistant would require hooking the HMI, which is interference. The button may be *observed* read-only (checklist C5, only after separate approval). |
 | **Sound from the head unit** | Excluded by the read-only rule (spec §2); revisit only on the owner's explicit request. | Both known mechanisms (a PCM helper into the audio router, or BMW's media player) need state-changing calls into BMW's audio manager, displace the driver's audio source, and need a root-installed helper for PCM; untested on a G01 (report `audio.md` AUD-03 to AUD-05, AUD-15). |
 | **Head-up display or instrument-cluster output** | Excluded. | A cluster-render experiment "restarted the instrument cluster twice" and showed brake, ABS and stability warnings and "Driver assistance restricted" (A `apps/redline/README.md:121-130`). |
 | **Node 22 for our app** | Not possible for an app. | Apps run under MainApp on the system Node 8 (A `.github/workflows/app-tests.yml:102`); `jap-node22` is only for root "tool" services and "BMW's apps and MainApp keep the system Node 8" (J `tools/jap-node22/README.md:1-5`). Shipping a root tool is excluded: the owner has no root key and the design ships only an unprivileged app (spec §4). |

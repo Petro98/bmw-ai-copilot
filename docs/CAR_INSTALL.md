@@ -22,16 +22,28 @@ It does:
 - show a Ukrainian screen with three tabs (ПОМІЧНИК, ДАТЧИКИ, СПОВІЩЕННЯ) while you have it open;
 - send your backend, over the Store's internet uplink: a small snapshot at most once a minute while driving,
   each `critical` or `warning` alert as soon as it is raised, its clearing (or its return) with the next of those
-  sends, and the questions you tap on the screen; while the screen is open it also keeps one request waiting
-  for answers you asked on the phone, and ends that request as soon as you leave the screen;
-- keep one small state file in its own data folder (alert memory, your limits, the pairing id and secret).
+  sends, or on its own within a minute when none comes, and the questions you tap on the screen. A question
+  tapped while the car is not driving carries the current readings (sent as one snapshot just before it). While the screen is open it also keeps one request
+  waiting for answers you asked on the phone, and ends that request as soon as you leave the screen. Each time
+  the car wakes and is online it fetches your limits and the phone's pop-up switch once; while the pairing panel
+  is shown it tries the backend again every 30 seconds. A failed request is not repeated at once: the waiting
+  request tries again after 5 seconds and the settings fetch after a minute, each wait doubling with every
+  further failure up to ten minutes, and starting over when the car wakes or the backend answers;
+- keep one small state file in its own data folder (alert memory, your limits, the pairing id and secret, and up
+  to 20 alert events the backend has not received yet, sent again on the next start; an event already received
+  may be sent once more, and the backend ignores the repeat). It is written when something in it changed: when
+  the car goes to sleep, when pairing or your settings change, at once when a `critical` or `warning` alert is
+  raised, and for clearings at most once a minute.
 
 It never:
 
 - writes to the car, calls a vehicle function, or sends a diagnostic request (the diagnostic gate ships
   disabled and has no caller; no signal is declared writable);
-- runs anything while the car is parked or locked: no timer, no request, no screen; it only listens for the
-  car's condition to change;
+- runs its own work while the car is parked or locked: none of its own timers, no request, no pop-up, no
+  connection; it only listens for the car's condition to change. One exception is not the app's: while the head
+  unit still reports the app's screen as shown, the kit that draws it keeps checking the screen up to four times
+  a second (and, with the GPU renderer, re-sends the last picture once a second) until the screen is reported
+  hidden; car check B15 records how long that lasts on this car;
 - holds an API key: Claude is called by your backend, never by the car;
 - updates itself: a new version is installed only when you tap Update in the Store.
 
@@ -40,13 +52,25 @@ It never:
 You need:
 
 1. The MGU Store on the head unit with the GPU renderer (`mgu-render`, 0.6.11 or later; `mgu-repo.json`
-   requires it) and the Store's internet uplink working over your phone's hotspot (the Store shows "Online").
-   Car checks A1 and A7 in [`CAR_CHECKLIST.md`](CAR_CHECKLIST.md) record this.
-2. The head unit's clock close to the real time (check A4). With a clock that is days off, every request fails
-   and the screen says «Годинник головного блока неправильний»; the app does not weaken certificate checks to
-   work around it.
+   requires it), the Store's Python tool `mgu-python` (the Store runs the app's build, `car/kit/tools/build.py`,
+   with it; it comes with the Store's updater), and the Store's internet uplink working over your phone's hotspot
+   (the Store shows "Online"). Car checks A1 and A7 in [`CAR_CHECKLIST.md`](CAR_CHECKLIST.md) record this.
+2. The head unit's clock close to the real time (check A4). With a clock so far off that your backend's
+   certificate is not valid at that time (days off), every request fails and the screen says «Годинник головного
+   блока неправильний»: on the pairing panel in place of its instructions (the QR code stays), and after pairing in
+   the answer area of the ПОМІЧНИК tab, without a tap. The app does not weaken certificate checks to work around
+   it. A smaller error is harmless: every upload carries the car's clock time, and the backend moves the reading
+   times onto its own clock when the car's clock is off by more than two minutes.
 3. Your backend running and reachable from the internet at an `https://` address with a valid certificate, with
-   `OWNER_TOKEN` set, so that only you can open the phone panel and register devices.
+   `VEHICLE_SOURCE=car`, `OWNER_TOKEN` and `SESSION_SECRET` set (README, «Owner access, device pairing and the car
+   source»), so that only you can open the phone panel and register devices. With the default demo source the
+   backend refuses the car's readings, alerts and questions: the car's network mark turns to «НЕМАЄ МЕРЕЖІ», and a
+   question tapped on the car's screen ends with «Сервер відхилив запит».
+   If the backend's database ran the demo before, the first start with `VEHICLE_SOURCE=car` deletes the demo
+   alert events, telemetry and engine state by itself. Paired devices, settings, spend and the dialog are kept,
+   but earlier dialog turns are no longer given to Claude as history. A later demo start on this database is
+   refused unless `ALLOW_VEHICLE_SOURCE_RESET=1` is set for that start; to run the demo next to real data, give it
+   its own `DATABASE_PATH` (README, «Demo data and the car's data in one database»).
 4. A GitHub account with two-factor authentication, for one **private** repository (the Store's source).
 5. A computer with this repository checked out and Node 22 (`npm ci` once). The publish script needs nothing
    else; it only copies files.
@@ -118,13 +142,23 @@ code instead of the question chips.
 1. Make sure the car is online (the Store shows "Online") and keep the app's screen open.
 2. Scan the QR code with the phone's camera. It opens your backend's `/pair` page; log in with your owner token
    if the page asks.
-3. Check the device id shown on the page, give the car a name, and confirm.
-4. Within about half a minute (the car tries again at most every 30 seconds while the panel is shown) the panel
-   gives way to the assistant and the network mark turns on. The car remembers that it is paired.
+3. The car's screen shows no device id to compare, so confirm only if you have just scanned the QR code on the
+   screen of your own car: give the car a name and tap «Підʼєднати».
+4. Within about a minute (the car tries again every 30 seconds while the panel is shown, and the backend may hold
+   that request up to 25 seconds before it answers) the panel gives way to the assistant and the network mark
+   turns on. The car remembers that it is paired.
+5. Check that the backend runs with the car as its source: tap a question chip on the car (it sends the current
+   readings with the question), or start the engine (the car then uploads once a minute). On the phone, «Авто»
+   then shows this car's values, and no «ДЕМО-ДАНІ» strip is shown. Until then «Авто» shows «Дані ще не
+   отримано.»: with only the ignition on, the car sends no readings by itself.
+
+While the pairing panel is on screen the app does not rest (section 6), so a quiet car being paired stays
+awake; it rests only when the car reports parked or standby, or after 15 quiet minutes once the screen is hidden.
 
 The QR code carries the car's device secret. Do not photograph the pairing panel or share a picture of it. If
 the device is ever revoked on the phone (Settings, devices), the car shows the pairing panel again on its next
-request.
+request. Revoking a device also clears, on the phone, every active alert the car had reported; the car reports
+its standing alerts again on its next start.
 
 ## 6. The three status marks
 
@@ -133,13 +167,25 @@ with «НЕМАЄ …» when it does not.
 
 | Mark | Lit means | «НЕМАЄ …» means |
 |---|---|---|
-| АВТО | the app has a current reading from the car (refreshed within the last 10 seconds) | no reading in 10 seconds: the car is parked, the signals stopped, or the app has just woken up |
+| АВТО | the app is awake and holds at least one reading from the car. It does not mean the values are new: most readings count until the car has reported no change of any signal for five minutes (a reading the car stops updating while other signals still arrive keeps its last value), polled ones (fuel, range, tyres) for five minutes after their last poll, and the odometer, service items and Check Control messages until the app sleeps | the app is asleep, or it has no reading from the car (just woken up, or nothing has arrived) |
 | МЕРЕЖА | this car is paired and your backend has answered a request from it since the car last woke up | not paired yet, no internet (hotspot or uplink), the backend does not answer or refused the car, the head unit's clock is wrong, or no request has been answered yet since waking |
 | CLAUDE | МЕРЕЖА is lit and the last question asked from the car did not fail | the network is down, or the last question failed (the reason is in the answer area) |
 
 The CLAUDE mark does not test Claude on its own: it only says that nothing failed on the way. Error lines in the
-answer area are «Немає зв'язку з сервером» (no connection), «Годинник головного блока неправильний» (the clock)
-and «Сервер відхилив запит» (the backend refused the question, for example when the monthly budget is used up).
+answer area are «Немає зв'язку з сервером» (no internet, the name or the secure connection could not be set up,
+or no answer in time), «Годинник головного блока неправильний» (the clock; it also shows without a tap, and stays
+until the backend answers a request) and «Сервер відхилив запит» (the backend refused the question or failed:
+for example the monthly budget is used up, the backend runs with the demo source, it answered with a server
+error, or it dropped the connection).
+
+With the engine off, after a long network fault the МЕРЕЖА mark can take up to ten minutes to come back on its
+own (failed requests back off, see «What the app does and never does»); asking a question brings it back at once.
+
+**When the app rests.** With the engine off and no signal from the car for 15 minutes, the app goes to sleep as if
+the car were parked: no tick, no requests, its readings blank. Asking a question or opening its screen wakes it
+again (while the pairing panel is on screen the 15 minutes never run out, so it does not rest this way), and so
+does the car reporting its condition again (for example when you press Start). A car that reports parked or
+standby stays asleep.
 
 ## 7. Settings
 
@@ -176,6 +222,8 @@ A passenger watches; the driver does not operate the phone or the screen for the
   the renderer's touch routing (B13). If tapping does nothing, note it; the app keeps working in the background.
 - **Long answers are cut on the car screen.** Standing, an answer shows up to eight lines; moving, up to three
   in the short spoken style. The full answer is always on the phone.
+- **Questions asked on the phone with the engine off** are answered from the car's last upload (from the last drive,
+  or from the last question tapped on the car), with their age; a question tapped on the car's screen carries the current readings.
 - Values against the cluster (B7), Check Control (B10), Ukrainian letters on the screen and in the pop-up (B11,
   B12), and that nothing keeps running after locking (B15, B16).
 
@@ -195,8 +243,14 @@ self: rss=41MB heap=12MB cpu=0.6%
 
 The line goes into the app's log file `p98_copilot.log` in its data folder on the head unit (the kit keeps it
 under 256 KB, with one older copy `p98_copilot.log.1`) and into the head unit's system log. Other lines in the
-same file: one at start (app version, Node version, start reason), one on each power change (for example
-`power: awake -> driving`, `power: driving -> asleep`), and errors, at most once a minute each. The Store's phone
+same file, each stamped with the time: one at start (app version, Node version, start reason), one on each power
+change (for example `power: awake -> driving`, `power: driving -> asleep`), pairing lines (`pairing: the backend
+accepted this car`), `screen: shown while asleep` / `screen: hidden while asleep` when the head unit shows or hides
+the app's screen while the app sleeps, the first failure of each kind per waking period as `uplink: <kind>
+(<path>)` (and one line for the wrong clock), and errors, at most once a minute each. The kit adds its own lines:
+`starting …`, `initialized (start reason …)`, `registered active (…)`, `shutdown requested by MainApp`, `this unit
+has no … - running without it` for an interface the installer left out, and the renderer's `renderd: connected,
+screen …` or `display: no mgu-renderd socket - software rendering until it appears`. The Store's phone
 page does not show an app's own log, so reading the file needs read-only shell access (car check A11, separate
 approval, or the service station). Without it, compare the app's memory in iDrive Monitor with the baseline of
 check A5 (check B9).
@@ -250,12 +304,23 @@ installed the Store, with a battery charger connected.
 
 ## What you should know before installing
 
-- **Platform proxies in the package manifest.** The kit's build (`car/kit/tools/build.py`, `PLATFORM_PROXIES`)
-  declares, in every app's SOME/IP manifest, the platform interfaces BMW's own apps declare, among them the
-  wake-on-demand interfaces (`WakeUpOnDemand`, `WodControl`) and the node-state consumer with
-  `RegisterShutdownClient`. Our code never references them (a test checks this), and the list is left as the kit
-  ships it. What declaring them alone allows or changes on this unit is **not known**: it is an open question
-  for the car checks (B18, read with B5 and B16), not something this guide can call harmless.
+- **Platform proxies in the package manifest.** The kit's build (`car/kit/tools/build.py`, `PLATFORM_PROXIES`,
+  lines 38-71, copied into every app's SOME/IP `manifest.json` by `manifest_for`) declares the platform
+  interfaces BMW's own apps declare. Besides the HMI and resource interfaces they include the wake-on-demand
+  interfaces (`WakeUpOnDemand` with `registerParticipant`, `WodControl` with `offerService`), the node-state
+  consumer with `RegisterShutdownClient`, other methods that change platform state (`PrivacySettings` setters,
+  `Provisioning.setFilterForProvisioningData`, `PrivateEntryPoint` and `AppBookmarks` registration), the BMW
+  account's identity attributes (`UserAccount` name and `gcid`) and `Lifecycle.powerStateDetailed`; the constant is
+  the full list. Our code never calls any of them (a test checks the wake and shutdown names in our code and the
+  bundle), and neither does the kit's runtime: it uses BMW's SDK only through `OnlineApp` and the SDK's logger
+  (start, initialized, the app's active/inactive status, screen visibility, its events and the RHMI application it
+  creates). Whether BMW's SDK itself calls any of them inside the app's process is not known (the SDK is not in
+  this repository). So what declaring them allows, and
+  whether they can be removed without breaking the app's start, are **open questions** for the car checks (B18,
+  read with B5 and B16), not something this guide can call harmless.
+- **The app stays registered as active.** It asks the kit to keep it running while hidden
+  (`ctx.background('monitor', true)`, as iDrive Monitor does), so it reports itself ACTIVE to BMW's app manager for
+  its whole life, parked included. Whether that changes when the head unit sleeps is what B16 measures.
 - **The pop-up has no priority setting** (section 8).
 - **The diagnostic gate is disabled.** The ДАТЧИКИ tab shows the intake temperature as needing a diagnostic
   read, which is switched off. Nothing in this version can turn it on.
@@ -274,5 +339,9 @@ checks of the spec (§12, items 7-13) map to it as follows:
 | 9. Autostart, long run, tile tap, shutdown | B3, B4, B5 | the start lines and `power:` lines |
 | 10. Check Control | B10 | the СПОВІЩЕННЯ tab and the pop-up |
 | 11. Ukrainian glyphs | B11, B12 | the screen and the pop-up (section 7) |
-| 12. One request to the backend | B14 | the МЕРЕЖА mark after pairing |
-| 13. Overnight shutdown and 12 V | B15, B16 | no log line after locking; the morning voltage |
+| 12. One request to the backend | B14 | the МЕРЕЖА mark after pairing; `uplink:` lines |
+| 13. Overnight shutdown and 12 V | B16 (related: B15) | the evening and morning voltage; no log line of the app after locking (B15) |
+
+This version does not expose the raw-value parts of items 7, 8, 10 and 12: `typeof global.gc` and the other
+runtime details, notification rates, the raw Check Control structure and colour values, and request latency
+and sizes are not logged. The checklist marks those parts as not available.

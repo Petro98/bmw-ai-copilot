@@ -168,8 +168,11 @@ Edits 1-3 and 8 are in `tools/build.py`, edit 4 in `runtime/signals.js`, edit 5 
   `Copyright (c) Project Nayuki`), `typescript-javascript/qrcodegen.ts` of
   https://github.com/nayuki/QR-Code-generator at commit `8329a7108fc22be3e1eec0a9f9318978579e3621`
   (SHA-256 of the file as fetched `1dc03fb5a10e0e2318ea162755bbdb9977ca6ce52cff959e9c9b6deafdccda9c`), read in
-  full before it was copied. Unchanged except for four comment lines and `/* eslint-disable */` at the top and
-  `export { qrcodegen };` at the end; its MIT notice is kept in the file.
+  full before it was copied. Unchanged except for five comment lines and `/* eslint-disable */` at the top, a `!`
+  added to the comment that opens its MIT notice (`/*!`, a legal comment), and `export { qrcodegen };` at the end.
+  Its MIT notice is kept in the file and, through that `!` and esbuild's `legalComments: 'inline'`
+  (`car/scripts/build-car.mjs`), in the generated bundle `car/apps/p98_copilot/main.js` as well (`car/test/bundle.test.ts`
+  checks it).
 
 ## What the kit does that matters for this project (read before the first run)
 
@@ -178,8 +181,20 @@ The kit was read before any of it ran here. Things it does beyond drawing:
 - `tools/build.py`: writes only under `car/dist/` (ignored by git). It downloads files only for an `app.json`
   `"assets"` entry (`fetch_assets`, `urllib`; our app has none) and shells out to `node tools/make_icon.js` only
   when an app has no `icon.png` (ours has one). It declares, in every app's SOME/IP `manifest.json`, the platform
-  proxies BMW's own apps declare (`PLATFORM_PROXIES`), among them `WakeUpOnDemand`, `WodControl` and the NSM
-  consumer with `RegisterShutdownClient`: the SDK's lifecycle uses them; our code never does.
+  proxies BMW's own apps declare (`PLATFORM_PROXIES`, lines 38-71, copied by `manifest_for`, lines 321-336).
+  Besides the HMI and resource interfaces they include the wake-on-demand interfaces (`WakeUpOnDemand` line 61,
+  `WodControl` line 62), the NSM consumer with `RegisterShutdownClient` (lines 68-70), other methods that change
+  platform state (`PrivacySettings` setters, lines 55-57; `AppBookmarks` and `PrivateEntryPoint` registration,
+  lines 58-60; `Provisioning.setFilterForProvisioningData`, lines 64-65), the BMW account's identity attributes
+  (`UserAccount` `firstName`, `gcid`, `id`, `name`, `type`, lines 52-54) and `Lifecycle.powerStateDetailed` (line
+  50). Neither the kit's runtime nor our code references any of them: the runtime uses BMW's SDK only through
+  `OnlineApp` and the SDK's logger (`runtime/mgu.js:23`, `:30`): `start`, `initialized`, the active/inactive
+  status in `runtime/life.js:36`, screen visibility in `runtime/mgu.js:663`, `getLastExecutedEntryPointUuid` in
+  `runtime/mgu.js:740`, its events, and the RHMI application it creates (screen states, entry states, resources;
+  `runtime/mgu.js:145-249`, `:685-697`). Whether BMW's SDK calls them inside our process is not known: the SDK
+  is not in this repository, and `tools/extract_sdk.js:33` lists an `NsmProxy` module among its files. Whether
+  they can be removed without breaking the app's start is an open question for the car checks
+  (`docs/CAR_CHECKLIST.md` B18, `docs/COMPATIBILITY.md` H-27). The list is left as the kit ships it.
 - `runtime/signals.js`: besides `watch` (read), it exports `set`, `call`, `proxy` and `on`, which can write fields
   and call methods on vehicle interfaces. Our code never uses them, and `car/src/kit/kit.d.ts` does not declare
   them. A field is writable only with `w` in its `app.json` flags (`r` read, `s` subscribe, `w` write); ours never

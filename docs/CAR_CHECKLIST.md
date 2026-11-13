@@ -1,8 +1,8 @@
 # Car checklist
 
-Every check that can only be settled on the owner's car: an X3 xDrive30i, model year 2021,
-North-American specification (to be confirmed by the owner), MGU head unit (iDrive 7), firmware
-`P18_23w44.2-1-3`, MGU Store installed by a service station.
+Every check that can only be settled on the owner's car: a BMW X3 xDrive30i, model year 2021 (to
+be confirmed by the owner; North-American specification assumed, H-1), MGU head unit (iDrive 7),
+firmware `P18_23w44.2-1-3`, MGU Store installed by a service station.
 
 The list merges the spec's car checks (§12) with the "car checks" of the ten research reports,
 with duplicates removed. Each check says what to do, what to record, why it matters, and what
@@ -81,8 +81,11 @@ approval it needs. The hypotheses it settles are numbered in `docs/COMPATIBILITY
 - **Do:** compare the head unit's time (iDrive clock, and the "checked at" time in the Store) with
   the phone's time, at ignition-on and again after ten minutes of driving.
 - **Record:** the difference in minutes or days.
-- **Why:** a clock that is days off breaks certificate checks for HTTPS; the car app then shows
-  «Годинник головного блока неправильний» instead of weakening certificate checks.
+- **Why:** a clock so far off that the backend's certificate is not valid at that time (days off)
+  breaks HTTPS; the car app then shows «Годинник головного блока неправильний» (on the pairing panel
+  before pairing, in the answer area after it) instead of weakening certificate checks. A smaller
+  error does not stop requests: every upload carries the car's clock time, and the backend moves
+  reading times onto its own clock when the difference is more than two minutes.
 - **Approval:** None.
 
 ### A5. Baseline load with iDrive Monitor
@@ -157,27 +160,34 @@ approval it needs. The hypotheses it settles are numbered in `docs/COMPATIBILITY
 
 ---
 
-## B. With a minimal read-only test app (phase 2)
+## B. With the Copilot app (phase 2)
 
-These use a small app that only reads passive signals and writes a log; it never writes to the
-car and makes no diagnostic request. Plan 2 Task 9 and `docs/CAR_INSTALL.md` describe how it is
-built and installed. Remove it afterwards if it is not the final app.
+These checks are done with Copilot itself (`p98_copilot`); there is no separate test app. It only
+reads passive signals, never writes to the car and makes no diagnostic request.
+`docs/CAR_INSTALL.md` describes how it is built and installed. Its log file holds, each line with
+its time: the start line (app version, Node version, start reason), the `power:` lines, the
+`self:` lines, pairing lines, `screen: … while asleep` lines, `uplink:` failure lines and other
+warnings, and the kit's own info lines (`CAR_INSTALL.md` section 9). Reading the file needs
+read-only shell access (A11); without it, only the screens and iDrive Monitor can be observed.
+Where a check below asks for something this version does not log or show, it says so.
 
 ### B1. Store build path
 
-- **Do:** add a private repository containing only a minimal app as a Store source (branch
-  channel, read-only token or "Sign in with GitHub"), install it, open its tile, then remove it.
-- **Record:** whether it lists, builds on the unit, shows a tile, and uninstalls cleanly; build
-  time.
+- **Do:** add the private deploy repository as a Store source (branch channel, read-only token
+  or "Sign in with GitHub"), install Copilot from it and open its tile (`docs/CAR_INSTALL.md`
+  sections 1-4).
+- **Record:** whether it lists, builds on the unit and shows a tile; build time; later, whether
+  it uninstalls cleanly (`docs/CAR_INSTALL.md` section 13).
 - **Why:** validates the private-repository and on-unit build path before real work.
 - **Approval:** Install.
 
 ### B2. Runtime identity
 
-- **Do:** the app logs once at start: `process.version`, `process.versions.openssl`,
-  `process.execArgv`, `typeof global.gc`, `typeof WebAssembly`, and which start path ran (screens
-  created, or background without screens).
-- **Record:** the log lines.
+- **Do:** read the start lines: the app's `Copilot <version> on Node <version>, start reason …`
+  and the kit's `initialized (start reason …)`; if the SDK created no screens, the kit logs an
+  error line saying so (`the SDK created no RHMI application …`).
+- **Record:** the log lines. This version does not log `process.versions.openssl`,
+  `process.execArgv`, `typeof global.gc` or `typeof WebAssembly`; those stay open.
 - **Why:** the shared packages are built for Node 8.16.2; some units run 8.9.4; the start path
   decides how the pop-up is raised. Settles H-2, H-4.
 - **Approval:** Install.
@@ -186,7 +196,7 @@ built and installed. Remove it afterwards if it is not the final app.
 
 - **Do:** after a cold start (ignition on, tile never touched) leave the car on or drive for 60+
   minutes. Then install another app through the Store (this restarts the app manager) and check
-  that the test app comes back on its own.
+  that the app comes back on its own.
 - **Record:** start lines, absence of "shutdown requested by MainApp", the start type listed by
   the Store, the restart after the other install.
 - **Why:** proves the background assistant can run without the screen. Settles H-3.
@@ -203,26 +213,29 @@ built and installed. Remove it afterwards if it is not the final app.
 
 ### B5. Power states and shutdown
 
-- **Do:** log every vehicle condition change with a timestamp through: unlock, ignition on, drive,
-  ignition off, door open and close, lock, walk away.
-- **Record:** the condition values in each step; minutes from locking to the last log line; which
-  signals still arrive after ignition off.
+- **Do:** go through: unlock, ignition on, drive, ignition off, door open and close, lock, walk
+  away; note the time of each step. Afterwards read the time-stamped `power:` lines (asleep, awake,
+  driving) and the kit's `shutdown requested by MainApp`.
+- **Record:** the `power:` transition at each step; minutes from locking to the last log line.
+  This version collapses the car's condition values into those three states and does not log the
+  raw values, nor which signals still arrive after ignition off.
 - **Why:** the power gate stops all work when parked; the head unit's time awake after locking is
   undocumented. Settles H-8 in part.
 - **Approval:** Install.
 
 ### B6. Which signals exist on this car
 
-- **Do:** read the app's start log for interfaces the installer removed as missing on this unit;
-  log the first raw value of each catalogue field; log the raw gear values (both
-  `statusGearboxDrive` and `DataPowerTrain2`) in P, R, N, D and in each gear; log the engine type
-  field (`Vehicle2.statusVehiclePartType.typeEngine`).
+- **Do:** read the kit's start lines `this unit has no … - running without it` for interfaces the
+  installer removed as missing on this unit, and look at the ДАТЧИКИ tab: a reading the car does
+  not send shows «Недоступно» with its reason. Note the gear tile in P, R, N, D and in each gear.
 - **If the Store refuses the install:** when the Store's build or install reports the 12 V charge
   field (`statusBattery2` of the CDS interface) or its interface as missing, publish again with the
   fallback `node car/scripts/publish-car.mjs --drop-reading battery12vCharge`, push and install again
   (`docs/CAR_INSTALL.md` section 10). The ДАТЧИКИ tab then shows the 12 V tile as «Недоступно».
-- **Record:** present or missing for every catalogue field; the raw gear values; the engine type;
-  whether the install needed the 12 V fallback.
+- **Record:** present or missing for every tile; what the gear tile shows; whether the install
+  needed the 12 V fallback. Not available in this version: the first raw value of each field, the
+  raw gear values (`statusGearboxDrive`, `DataPowerTrain2`) and the engine type
+  (`Vehicle2.statusVehiclePartType` is not declared in `app.json`, so it cannot be read).
 - **Why:** no G01 signal catalogue is published; missing fields must show as unavailable, never as
   zero. Settles H-13 and part of H-1.
 - **Approval:** Install.
@@ -240,9 +253,9 @@ built and installed. Remove it afterwards if it is not the final app.
 
 ### B8. Notification rates
 
-- **Do:** count notifications per field per minute: parked with ignition on, at steady cruise,
-  while accelerating.
-- **Record:** the counts; fields that never notify.
+- **Do:** not available in this version: the app keeps no notification counts and logs nothing
+  per signal. Skip it; at most note which ДАТЧИКИ tiles never get a value in B6.
+- **Record:** nothing beyond B6.
 - **Why:** decides which fields must be polled (no faster than every 10 s) and confirms the 1 Hz
   tick is enough. Settles H-13.
 - **Approval:** Install.
@@ -257,7 +270,9 @@ built and installed. Remove it afterwards if it is not the final app.
   `docs/CAR_INSTALL.md` section 9 explains; without that access, read the app's memory in iDrive
   Monitor. Compare with A5. After a few days, check the size of its data folder.
 - **Record:** the `self:` figures and how `rss` changes from line to line; the renderer's log lines
-  (GPU frames, not software PNG frames); data folder size.
+  (`renderd: connected, screen …` means GPU frames; `display: no mgu-renderd socket - software
+  rendering until it appears` or `display: software rendering (setting)` means software PNG
+  frames); data folder size.
 - **Why:** the budgets in `ARCHITECTURE.md` (≤ 60 MB steady RSS, zero growth, no flash history)
   are targets until measured. Settles H-6 in part.
 - **Approval:** Install.
@@ -266,9 +281,12 @@ built and installed. Remove it afterwards if it is not the final app.
 
 - **Do:** parked, engine off, ignition on, trigger a harmless Check Control message: for example
   open the bonnet, or unbuckle the driver's seat belt while stationary. Close it again.
-- **Record:** the raw structure of `basicList` and `ccList`/`newCCMessage`, the message id, the
-  active-state values, the colour values, the language of the text, the delay compared with the
-  cluster, and whether the app received it with its screen closed.
+- **Record:** what the СПОВІЩЕННЯ tab and the pop-up show (severity word and icon, title, tag
+  line), the language of the text, the delay compared with the cluster, whether the app received
+  it with its screen closed (the pop-up appears, or the entry is on the tab when you open it), and
+  whether it is marked «ЗНЯТО …» after you close the bonnet or buckle up. Not logged or shown by
+  this version: the raw structure of `basicList` and `ccList`/`newCCMessage`, the active-state
+  values and the colour values.
 - **Why:** Check Control is the only BMW-authoritative warning source and the main alert trigger;
   its colours and text language are undocumented. Settles H-15.
 - **Approval:** Install.
@@ -278,8 +296,8 @@ built and installed. Remove it afterwards if it is not the final app.
 - **Do:** in the app's settings («Налаштування») turn the switch «Тестове сповіщення» on (if it is
   already on, off and on again: only switching it on shows the pop-up). About four seconds later the
   app shows one pop-up «Тестове сповіщення Copilot» through the same path as an alert (it needs
-  «Спливаючі сповіщення» on, and it waits while reversing); it is not listed, stored or sent to the
-  phone. Use the four seconds to bring navigation to the front, and repeat with Android Auto in
+  «Спливаючі сповіщення» on, and the phone's switch «Вікна на екрані авто» on, and it waits while
+  reversing); it is not listed, stored or sent to the phone. Use the four seconds to bring navigation to the front, and repeat with Android Auto in
   front. Then repeat B10 and watch that BMW's own Check Control message appears first and is never
   covered by ours: the kit exposes no pop-up priority, so this can only be seen on the car.
 - **If the pop-up shows blank or wrong text** (empty boxes, gaps, missing Ukrainian letters): turn on
@@ -293,29 +311,43 @@ built and installed. Remove it afterwards if it is not the final app.
 
 ### B12. Ukrainian text on the drawn screen
 
-- **Do:** open the test app's screen showing a pangram with `і ї є ґ І Ї Є Ґ ’` and the tile title
-  and a settings row in Ukrainian.
-- **Record:** which characters render, on the drawn screen and in BMW's own text (tile, settings).
+- **Do:** open the app's three tabs and its settings, whose three rows are Ukrainian
+  («Спливаючі сповіщення», «Сповіщення латиницею», «Тестове сповіщення»). There is no pangram
+  screen: the app's fixed texts show `і І є Є` (`ї` only in the note shown when the backend address
+  is missing). To check `ґ Ґ ї Ї`, keep the car's screen open on the ПОМІЧНИК tab (paired, car
+  awake) and type a short question containing them on the phone panel (the car cuts the question to
+  one line): the car shows that question and its answer. An alert text the car sends may contain
+  them too. The screen draws every typographic apostrophe (`’`, `ʼ`) as `'`. The tile title is
+  «Copilot» (Latin letters).
+- **Record:** which characters render, on the drawn screen and in BMW's own text (settings rows);
+  a character the screen's font lacks is drawn as `□`.
 - **Why:** the shipped atlas lacks these letters; the car app ships a re-baked one. Settles H-11.
 - **Approval:** Install.
 
 ### B13. Touch on the drawn screen
 
-- **Do:** on the app's screen tap each header tab (ПОМІЧНИК, ДАТЧИКИ, СПОВІЩЕННЯ) and, parked, one
-  question chip on the ПОМІЧНИК tab (and, for comparison, a drawn button in an app already
+- **Do:** on the app's screen tap each header tab (ПОМІЧНИК, ДАТЧИКИ, СПОВІЩЕННЯ) and, parked and
+  after pairing (`docs/CAR_INSTALL.md` section 5; until then the pairing panel replaces the chips),
+  one question chip on the ПОМІЧНИК tab (and, for comparison, a drawn button in an app already
   installed). The screen is operated by touch: the kit no longer takes over the iDrive controller,
   so the controller may not move between the tabs and chips.
-- **Record:** whether each tap reaches the app (the tab changes; the chip shows «Готую відповідь…»).
+- **Record:** whether each tap reaches the app (the tab changes; after a chip, the answer area shows
+  «Готую відповідь…»).
 - **Why:** the tabs and the topic chips on the iDrive screen need the Store renderer's touch routing.
   Settles H-12.
 - **Approval:** Install.
 
 ### B14. One request to the backend over the uplink
 
-- **Do:** with the uplink online, let the test app send one small request to the owner's backend
-  (paired as `docs/CAR_INSTALL.md` describes), parked and while driving.
-- **Record:** whether the lease file appears only while online, success or the error kind
-  (offline, DNS, timeout, clock, TLS), latency, request and response size.
+- **Do:** with the uplink online and the backend running with `VEHICLE_SOURCE=car`, pair the app
+  (`docs/CAR_INSTALL.md` section 5), then tap a question chip, parked and (by a passenger) while
+  driving.
+- **Record:** the МЕРЕЖА mark; the answer, or the error line in the answer area («Немає зв'язку з
+  сервером», «Годинник головного блока неправильний», «Сервер відхилив запит»); and, with log
+  access, the `uplink: <kind> (<path>)` line for the first failure of each kind (offline, dns,
+  timeout, tls, server-error, client-error) and the wrong-clock line. Not measured by this version:
+  latency and request and response sizes; whether the lease file appears only while online needs
+  shell access (A11).
 - **Why:** the car → backend path is the only cloud path; certificate checks are not weakened.
   Settles H-19.
 - **Approval:** Install.
@@ -323,9 +355,16 @@ built and installed. Remove it afterwards if it is not the final app.
 ### B15. Nothing left running when parked
 
 - **Do:** after leaving the app's screen, and after ignition off and locking, check the log and
-  iDrive Monitor.
-- **Record:** that no request, timer log line or open connection follows the switch to parked.
-- **Why:** the app must not keep the uplink or the head unit awake.
+  iDrive Monitor. Then a second pass with the app's screen left open at ignition off and at
+  locking.
+- **Record:** that no request, `uplink:` line or other line of the app follows `power: … ->
+  asleep`; in the second pass, whether `screen: hidden while asleep` follows and how long after
+  the switch to parked (no such line, with no `shutdown requested by MainApp` and no
+  `power: asleep -> …` after it, means the head unit kept reporting the screen as shown).
+- **Why:** the app must not keep the uplink or the head unit awake. Its own timers and requests
+  stop when it sleeps, but the kit's screen loop (up to four turns a second) and, with the GPU
+  renderer, its keep-alive follow the screen's visibility, not the app's power state; the second
+  pass shows how long that lasts on this car.
 - **Approval:** Install.
 
 ### B16. Overnight shutdown and 12 V
@@ -335,29 +374,42 @@ built and installed. Remove it afterwards if it is not the final app.
   battery display if it has one), and note when the head unit stops (for example the Tailscale
   tool showing the car offline, or the app's last log line).
 - **Record:** both voltages, both shutdown times, temperature.
-- **Why:** an anti-goal is draining the battery or keeping the car awake. Settles H-8.
+- **Why:** an anti-goal is draining the battery or keeping the car awake. The app stays registered
+  as active with BMW's app manager for its whole life, parked included (`docs/CAR_INSTALL.md`,
+  «What you should know before installing»); this measures whether that or anything else changes
+  when the unit sleeps. Settles H-8.
 - **Approval:** Install.
 
 ### B17. Writable locations (optional)
 
-- **Do:** the test app checks write access to `/dev/shm`, `/tmp` and `/var/opt/hdshare` without
-  writing anything large, and logs the result.
-- **Record:** yes or no for each.
+- **Do:** not implemented in this version: the app writes its state, log and settings in its own
+  data folder, and the kit writes the screen's PNG frames (four rotating files, removed at the next
+  start) in the app's own `rhmiData/resources` folder; it checks no other location. Skip it unless a
+  later version adds the check.
+- **Record:** nothing.
 - **Why:** a RAM-backed location could hold debug logs without flash wear.
 - **Approval:** Install.
 
 ### B18. Platform proxies in the package manifest (open question)
 
 - **Do:** nothing beyond B5 and B16; read their results with this question in mind. The kit's build
-  (`car/kit/tools/build.py`, `PLATFORM_PROXIES`) declares, in every app's SOME/IP manifest, the
-  platform interfaces BMW's own apps declare, among them the wake-on-demand interfaces
-  (`WakeUpOnDemand`, `WodControl`) and the node-state consumer with `RegisterShutdownClient`. Our
-  code never references them (a test checks this) and the list is left as the kit ships it.
+  (`car/kit/tools/build.py`, `PLATFORM_PROXIES`, lines 38-71) declares, in every app's SOME/IP
+  manifest, the platform interfaces BMW's own apps declare. Besides the HMI and resource
+  interfaces they include the wake-on-demand interfaces (`WakeUpOnDemand`, `WodControl`), the
+  node-state consumer with `RegisterShutdownClient`, other methods that change platform state
+  (`PrivacySettings` setters, `Provisioning.setFilterForProvisioningData`, `PrivateEntryPoint` and
+  `AppBookmarks` registration), the BMW account's identity attributes (`UserAccount` name and
+  `gcid`) and `Lifecycle.powerStateDetailed`; the constant is the full list. Our code and the kit's
+  runtime never call any of them (the runtime uses BMW's SDK only through `OnlineApp` and the
+  SDK's logger; a test checks the wake and shutdown names in our code and the bundle), and the list
+  is left as the kit ships it. Whether BMW's SDK itself calls any of them inside the app's process
+  is not known.
 - **Record:** whether, with the app installed, the head unit stays awake longer after locking or
   wakes on its own (B5, B16), and anything the Store or the service station can say about what
-  these declarations allow.
-- **Why:** what declaring them alone allows or changes on this unit is not known; it is not
-  assumed to be harmless.
+  these declarations allow and whether an app starts without them.
+- **Why:** what declaring them allows, whether BMW's SDK uses them, and whether they can be
+  removed without breaking the app's start are not known; they are not assumed to be harmless.
+  Settles H-27.
 - **Approval:** Install (same app).
 
 ---

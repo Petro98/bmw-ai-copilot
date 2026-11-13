@@ -77,16 +77,21 @@ None of these blocks phase 1.
 
 | # | Decision | Needed before | Notes |
 |---|---|---|---|
-| 1 | Confirm the car: X3 xDrive30i, model year 2021, North-American specification, 2.0-litre four-cylinder petrol, 8-speed automatic, all-wheel drive. | phase 2 | Derived from the owner's data; units (°F, psi, miles) and the engine family matter for the signal catalogue. |
+| 1 | Confirm the car: BMW X3 xDrive30i, model year 2021, North-American specification, 2.0-litre four-cylinder petrol, 8-speed automatic, all-wheel drive. | phase 2 | Derived from the owner's data; units (°F, psi, miles) and the engine family matter for the signal catalogue. |
 | 2 | Approve the design spec and the phase 0 documents. | end of phase 0 | |
 | 3 | Model for the spoken route: stay on `claude-opus-5-5` or use a faster model (`claude-haiku-5-5`) after measuring latency. | phase 3 | `CLAUDE_MODEL_VOICE` setting. |
-| 4 | Where the backend is hosted for real use, and its `OWNER_TOKEN`. | phase 2 | Phase 1 runs on the owner's laptop. |
-| 5 | Repository public or private; with that, how the car learns the backend address (end-to-end-encrypted rendezvous during pairing, or a configuration file in a private Store source). | start of phase 2 | The backend address is never committed to a public repository. |
+| 4 | Where the backend is hosted for real use, and its `OWNER_TOKEN` and `SESSION_SECRET`; whether the panel is reachable from the public internet or only over a VPN. | phase 2 | Phase 1 runs on the owner's laptop. The car needs the backend (`/car/v1`) at an `https://` address with `VEHICLE_SOURCE=car`. Anyone who can reach the sign-in page can delay the owner's sign-in (README, «Lock-out»). |
+| 5 | Repository public or private; with that, how the car learns the backend address (end-to-end-encrypted rendezvous during pairing, or a configuration file in a private Store source). | start of phase 2 | Built as a configuration value in a private deploy repository (`docs/CAR_INSTALL.md` sections 1-2); this repository stays public. Open only if the owner prefers the rendezvous. The backend address is never committed to a public repository. |
 | 6 | Link a Claude Console organisation to the subscription for the included API credits; create a key in its own workspace with a spend limit. | live mode | Mock mode works without it. |
 | 7 | Whether to approve the on-car diagnostic checks (one read-only fault-memory read, unit identification). Until then diagnostics stay disabled. | phase 5 extras | Checklist section C. |
 | 8 | Whether to approve the phone-voice audio checks in the car. | phase 3 exit | Checklist section C. |
 | 9 | What to do about write-capable community apps or tools already installed on the head unit (if the inventory finds any). | phase 2 | The project's own code never writes; removing others is the owner's call. |
 | 10 | Procedure with the service station before and after a BMW software update (Store setup removed by the update; re-installation needs root access the owner does not hold). | before any BMW update | Checklist item A2. |
+| 11 | How old a reading may be and still be stored as a current telemetry sample. | before relying on long-term trends | A passive reading can keep an old time while its value is genuinely unchanged (the odometer while parked), so a cut-off could drop real data. See «Known limitations». |
+| 12 | The moving layout on a narrow phone: keep it, or use a smaller driving text style, a line clamp, or hide the chips while an answer is shown. | phase 3 exit | At 360 px wide only one line of the answer shows above the talk button. Plan 1 and `docs/design/README.md` prescribe the present style. |
+| 13 | Sign-in lock-out behind a proxy: keep one shared lock for every visitor, or add a setting for the number of trusted proxies so each visitor is locked separately. | before the panel is reachable from the internet | README, «Lock-out». A count higher than the real number of proxies would let a forged `X-Forwarded-For` escape the lock. |
+| 14 | Whether to keep the platform proxies the kit declares in the package manifest, or remove some (a local edit to the vendored kit). | after car check B18 | `docs/COMPATIBILITY.md` H-27. Whether the app starts without them is not known. |
+| 15 | The apostrophe in «ПАМ'ЯТЬ ПОМИЛОК BMW»: keep `'` or use `ʼ` (U+02BC), as the panel's other copy does. | any time | The same tag text is on the car screen, in the panel and in the prompt, and must change in all three together. |
 
 Decided on 2026-11-13: approach A (own code, reuse of MIT code allowed); Android with Android
 Auto; Store installed by a service station, no root key; free browser speech preferred; MIT licence
@@ -94,6 +99,19 @@ for our code.
 
 Revisited only on the owner's explicit request: sound from the head unit itself, head-up display
 or cluster output, a root tool on the head unit.
+
+## Known limitations
+
+Left open on purpose after the review of the implementation; each is one line here.
+
+- Nothing has been verified on the car yet: every on-car behaviour waits for `CAR_CHECKLIST.md`.
+- A telemetry sample may record a reading that has not changed for a while as current (open decision 11).
+- A service item the car marks as due now (red) is reported as due now, not as overdue: the car's colour has no overdue value; whether its date has passed is only in the car's own due text, which is passed on as written.
+- On a 360 px wide phone the moving layout shows one line of the answer above the talk button and the rest by scrolling inside the card; the answer is spoken in full (open decision 12).
+- Long answers are cut on the head-unit screen (eight lines standing, three moving); the full answer is on the phone.
+- A question asked on the phone while the engine is off is answered from the car's last upload, with its age; only a question tapped on the car carries the current readings.
+- The Docker images and the nginx configuration have been checked only by reading and by static tests; they have not been run.
+- The budget is checked when a question starts: questions in flight reserve their worst-case output cost, but not their input, so the last question admitted near the edge can take the spend somewhat past a limit, and an overlapping question there is refused although the budget is not spent (one owner, so accepted; the Console workspace spend limit is the hard cap).
 
 ## Future ideas
 

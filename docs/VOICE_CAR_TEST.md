@@ -181,8 +181,10 @@ over HTTPS.
 
 - **Do (parked):** ask a question and switch the phone to flight mode while the answer is being
   spoken; switch it back and ask again.
-- **Observe:** speech stops after the sentence in progress, an error is shown, the state returns to
-  idle; the next question works once the network is back.
+- **Observe:** if the answer was still arriving, speech stops at once (mid-sentence), an error is
+  shown and the state returns to «Натисніть і говоріть». If the whole answer had already arrived
+  (usual for a short answer), nothing fails: it is spoken to the end and no error is shown. Either
+  way the next question works once the network is back.
 - **Record:** behaved as described yes / no; what the screen showed.
 
   Result: ____________________
