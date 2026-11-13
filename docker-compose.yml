@@ -1,0 +1,41 @@
+# BMW AI Copilot: backend and phone panel.
+#   cp .env.example .env    (optional; without it every default applies: mock vehicle, mock Claude)
+#   docker compose up --build
+# Panel: http://localhost:8080 (it proxies /api to the backend). Backend: http://localhost:3000/api/health.
+# Both ports are bound to 127.0.0.1 only. Nothing here talks to a vehicle.
+name: bmw-ai-copilot
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: apps/backend/Dockerfile
+    env_file:
+      - path: .env
+        required: false
+    # These win over .env: inside the container the backend must listen on every interface and keep its
+    # database on the volume.
+    environment:
+      HOST: 0.0.0.0
+      PORT: "3000"
+      DATABASE_PATH: /data/copilot.sqlite
+    volumes:
+      - copilot-data:/data
+    ports:
+      - "127.0.0.1:3000:3000"
+    restart: on-failure:3
+    stop_grace_period: 15s
+
+  panel:
+    build:
+      context: .
+      dockerfile: apps/companion/Dockerfile
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:80"
+    restart: on-failure:3
+
+volumes:
+  copilot-data:

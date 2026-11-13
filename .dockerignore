@@ -1,0 +1,17 @@
+# Keep private and bulky files out of any Docker build context.
+.git
+.research
+.env
+.env.*
+!.env.example
+**/node_modules
+**/dist
+**/.angular
+**/coverage
+data
+**/*.sqlite*
+.playwright-mcp
+car/build
+car/preview
+.idea
+.vscode

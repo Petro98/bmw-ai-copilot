@@ -65,7 +65,11 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build:car
+      - name: The committed app bundle matches its sources
+        run: git diff --exit-code car/apps/p98_copilot/main.js
       - run: npm test -w car
+      - name: Kit runtime tests
+        run: node car/kit/tools/test_runtime.js
       - uses: actions/setup-node@v5
         with:
           node-version: 8.16.2
@@ -75,3 +79,25 @@ jobs:
         run: node --check car/apps/p98_copilot/main.js
       - name: Uplink smoke test on Node 8.16.2
         run: node car/test/node8-uplink-smoke.js
+
+  companion:
+    # The phone panel: a standalone Angular project with its own lockfile (not an npm workspace). Its specs run
+    # headless (Vitest with jsdom); the build type-checks against packages/*/src through its tsconfig paths.
+    name: companion (tests, build)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/companion
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: apps/companion/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
