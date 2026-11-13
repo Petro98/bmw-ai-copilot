@@ -1,0 +1,51 @@
+@if (exchange(); as ex) {
+  <section class="card" [attr.aria-busy]="ask.pending()">
+    <span class="phone-label who">ВИ</span>
+    <p class="question" data-question>{{ ex.question }}</p>
+    <span class="phone-label who divider">COPILOT</span>
+    @if (ex.error) {
+      <p class="error" role="alert" data-error>{{ ex.error }}</p>
+    } @else {
+      <p class="answer-text" data-answer [class.answer-driving]="moving()" [class.phone-body]="!moving()">{{ ex.answer }}</p>
+    }
+  </section>
+}
+
+@if (ask.pending()) {
+  <button type="button" class="secondary" (click)="ask.cancel()">Скасувати</button>
+}
+
+@if (!moving() && earlier().length > 0) {
+  <details class="earlier">
+    <summary>Раніше</summary>
+    <ol class="turns">
+      @for (turn of earlier(); track turn.id) {
+        <li class="turn">
+          <span class="phone-label meta">{{ time(turn.at) }}</span>
+          <p class="question">{{ turn.question }}</p>
+          <p class="phone-body">{{ turn.answer }}</p>
+        </li>
+      }
+    </ol>
+  </details>
+}
+
+<div class="chips">
+  @for (topic of topics(); track topic) {
+    <button type="button" class="chip" data-chip [disabled]="ask.pending()" (click)="send(topic)">{{ topic }}</button>
+  }
+</div>
+
+@if (!moving()) {
+  <form class="ask" (submit)="submit($event)">
+    <label class="phone-label field-label" for="question">ВАШЕ ПИТАННЯ</label>
+    <div class="field-row">
+      <input id="question" type="text" autocomplete="off" enterkeyhint="send"
+        [attr.maxlength]="maxChars" [value]="draft()" [disabled]="ask.pending()" (input)="onInput($event)">
+      <button type="submit" class="send" [disabled]="!canSend()">Запитати</button>
+    </div>
+    @if (draft().length >= counterFrom) {
+      <span class="phone-label counter" data-counter>{{ draft().length }} / {{ maxChars }}</span>
+    }
+  </form>
+}

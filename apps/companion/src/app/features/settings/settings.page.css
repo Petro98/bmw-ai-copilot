@@ -1,0 +1,152 @@
+/* After docs/design/mockups/PhoneSettings.dc.html: labelled sections of rows on `surface`. */
+
+:host {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: var(--space-1) var(--space-3) var(--space-3);
+}
+
+.block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.heading {
+  margin: 0;
+  color: var(--ink-dim);
+}
+
+p {
+  margin: 0;
+}
+
+.hint,
+.explain,
+.value,
+.field-label {
+  color: var(--ink-dim);
+}
+
+.hint {
+  font-size: 13px;
+  line-height: 16px;
+}
+
+.explain,
+.message {
+  font-size: 17px;
+  line-height: 26px;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.list > * + * {
+  border-top: 1px solid var(--line);
+}
+
+.row {
+  width: 100%;
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  background: none;
+  color: var(--ink);
+  text-align: left;
+  font-size: 17px;
+  line-height: 26px;
+}
+
+button.row {
+  cursor: pointer;
+}
+
+.value {
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+input[type="checkbox"] {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  margin: 0;
+  accent-color: var(--signal);
+}
+
+.editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: 0 var(--space-3) var(--space-3);
+}
+
+input[type="number"],
+select {
+  min-height: 48px;
+  min-width: 0;
+  padding: 0 12px;
+  border: 2px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  color: var(--ink);
+  font-size: 17px;
+  line-height: 26px;
+}
+
+select {
+  max-width: 60%;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.primary,
+.secondary {
+  min-height: 48px;
+  padding: 0 18px;
+  border-radius: var(--radius-md);
+  font-size: 17px;
+  line-height: 26px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.primary {
+  border: 0;
+  background: var(--signal);
+  color: var(--on-signal);
+}
+
+.secondary {
+  border: 2px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--ink);
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}

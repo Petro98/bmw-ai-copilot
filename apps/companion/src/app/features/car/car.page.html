@@ -1,0 +1,23 @@
+<section class="block" aria-labelledby="car-now">
+  <h2 class="phone-label heading" id="car-now">
+    ЗАРАЗ@if (updatedAt(); as time) {<span> · ОНОВЛЕНО О {{ time }}</span>}
+  </h2>
+  <div class="tiles">
+    @for (tile of tiles(); track tile.label) {
+      <app-reading-tile [label]="tile.label" [reading]="tile.reading" [target]="tile.target" [now]="now()" />
+    }
+  </div>
+</section>
+
+<section class="block" aria-labelledby="car-alerts">
+  <h2 class="phone-label heading" id="car-alerts">СПОВІЩЕННЯ</h2>
+  @if (alerts().length > 0) {
+    <ul class="alerts">
+      @for (alert of alerts(); track alert.id) {
+        <li><app-alert-row [alert]="alert" /></li>
+      }
+    </ul>
+  } @else {
+    <p class="empty" data-empty>Сповіщень немає</p>
+  }
+</section>
