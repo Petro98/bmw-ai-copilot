@@ -40,7 +40,15 @@ interface FakeFinal {
 
 interface Captured { body: Record<string, unknown>; options: { signal?: AbortSignal; timeout?: number } | undefined }
 
-function fakeClient(script: { deltas?: string[]; final?: FakeFinal; fail?: unknown; waitForAbort?: boolean; apiKey?: string }) {
+/** What the SDK stream holds after `message_start`: `stream.currentMessage` (SDK 1.8.0 `BetaMessageStream`). */
+interface FakeStarted {
+  model: string;
+  usage: { input_tokens: number; output_tokens: number; cache_read_input_tokens: number | null; cache_creation_input_tokens: number | null };
+}
+
+function fakeClient(script: {
+  deltas?: string[]; final?: FakeFinal; fail?: unknown; waitForAbort?: boolean; apiKey?: string; started?: FakeStarted;
+}) {
   const captured: Captured[] = [];
   const client = {
     apiKey: script.apiKey ?? null,
@@ -49,12 +57,22 @@ function fakeClient(script: { deltas?: string[]; final?: FakeFinal; fail?: unkno
         stream(body: Record<string, unknown>, options?: { signal?: AbortSignal; timeout?: number }) {
           captured.push({ body, options });
           const listeners: Array<(delta: string, snapshot: string) => void> = [];
+          let current: FakeStarted | undefined;
           return {
             on(event: string, listener: (delta: string, snapshot: string) => void) {
               if (event === 'text') listeners.push(listener);
               return this;
             },
+            get currentMessage() {
+              return current;
+            },
             async finalMessage() {
+              current = script.started;       // message_start, when the script has one
+              let snapshot = '';
+              for (const delta of script.deltas ?? []) {
+                snapshot += delta;
+                for (const listener of listeners) listener(delta, snapshot);
+              }
               if (script.waitForAbort) {
                 const signal = options?.signal;
                 await new Promise<void>((resolve) => {
@@ -62,11 +80,6 @@ function fakeClient(script: { deltas?: string[]; final?: FakeFinal; fail?: unkno
                   signal.addEventListener('abort', () => resolve(), { once: true });
                 });
                 throw new APIUserAbortError();
-              }
-              let snapshot = '';
-              for (const delta of script.deltas ?? []) {
-                snapshot += delta;
-                for (const listener of listeners) listener(delta, snapshot);
               }
               if (script.fail !== undefined) throw script.fail;
               const final = script.final ?? { stop_reason: 'end_turn', content: [] };
@@ -368,6 +381,82 @@ describe('AnthropicGateway', () => {
   test('the overall timeout aborts a stream that never finishes', async () => {
     const { client } = fakeClient({ waitForAbort: true });
     await expectClaudeError(new AnthropicGateway(client).ask(prompt, opts({ timeoutMs: 20 })), 'timeout');
+  });
+
+  const started: FakeStarted = {
+    model: 'claude-opus-5-5',
+    usage: { input_tokens: 3000, output_tokens: 1, cache_read_input_tokens: 1200, cache_creation_input_tokens: null },
+  };
+
+  test('a request aborted after it started streaming carries a conservative billed attempt', async () => {
+    let t = 1_000;
+    const { client } = fakeClient({ started, deltas: ['Масло ', '92 °C, ', 'норма'], waitForAbort: true });
+    const controller = new AbortController();
+    const pending = new AnthropicGateway(client, { now: () => t }).ask(prompt, opts({ signal: controller.signal, maxTokens: 16_000 }));
+    await Promise.resolve();
+    t += 10_000;                     // ten seconds after the request started
+    controller.abort();
+    const error = await expectClaudeError(pending, 'timeout');
+    // Input counters exactly as message_start reported them; output is the largest of the reported count,
+    // half the streamed characters and 100 tokens per elapsed second: 10 s → 1000.
+    expect(error.billed).toEqual([
+      { model: 'claude-opus-5-5', usage: { inputTokens: 3000, outputTokens: 1000, cacheReadTokens: 1200, cacheWriteTokens: 0 } },
+    ]);
+  });
+
+  test('a request that times out while still thinking is billed by elapsed time, capped at max_tokens', async () => {
+    let t = 0;
+    const { client } = fakeClient({ started, waitForAbort: true });     // no text streamed at all
+    const controller = new AbortController();
+    const pending = new AnthropicGateway(client, { now: () => t }).ask(prompt, opts({ signal: controller.signal, maxTokens: 2048 }));
+    await Promise.resolve();
+    t = 60_000;
+    controller.abort();
+    const error = await expectClaudeError(pending, 'timeout');
+    expect(error.billed?.[0]?.usage.outputTokens).toBe(2048);
+  });
+
+  test('the streamed characters set the floor when they exceed the time estimate', async () => {
+    let t = 0;
+    const { client } = fakeClient({ started, deltas: ['ж'.repeat(5000)], waitForAbort: true });
+    const controller = new AbortController();
+    const pending = new AnthropicGateway(client, { now: () => t }).ask(prompt, opts({ signal: controller.signal, maxTokens: 16_000 }));
+    await Promise.resolve();
+    t = 1_000;                       // 1 s → 100 by time; 5000 characters → 2500
+    controller.abort();
+    const error = await expectClaudeError(pending, 'timeout');
+    expect(error.billed?.[0]?.usage.outputTokens).toBe(2500);
+  });
+
+  test('a request aborted before message_start carries no billed list', async () => {
+    const { client } = fakeClient({ waitForAbort: true });
+    const controller = new AbortController();
+    const pending = new AnthropicGateway(client).ask(prompt, opts({ signal: controller.signal }));
+    controller.abort();
+    const error = await expectClaudeError(pending, 'timeout');
+    expect(error.billed).toBeUndefined();
+  });
+
+  test('a non-timeout error after message_start is not given an estimated bill', async () => {
+    const { client } = fakeClient({ started, fail: new RateLimitError(429, rateLimitBody, undefined, new Headers()) });
+    const error = await expectClaudeError(new AnthropicGateway(client).ask(prompt, opts()), 'rate-limited');
+    expect(error.billed).toBeUndefined();
+  });
+
+  test('an answer cut off by max_tokens is not returned as a complete answer', async () => {
+    const { client } = fakeClient({
+      deltas: ['Масло 92 °C, а охолоджувальна'],
+      final: {
+        stop_reason: 'max_tokens',
+        content: [{ type: 'text', text: 'Масло 92 °C, а охолоджувальна' }],
+        usage: { input_tokens: 3000, output_tokens: 2048, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+      },
+    });
+    const error = await expectClaudeError(new AnthropicGateway(client).ask(prompt, opts()), 'empty-answer');
+    expect(error.message).toContain('max_tokens');
+    expect(error.billed).toEqual([
+      { model: 'claude-opus-5-5', usage: { inputTokens: 3000, outputTokens: 2048, cacheReadTokens: 0, cacheWriteTokens: 0 } },
+    ]);
   });
 });
 

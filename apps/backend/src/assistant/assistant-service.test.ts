@@ -54,7 +54,9 @@ interface Rig {
   usageRows(): number;
 }
 
-function rig(options: { dailyUsdLimit?: number; requestsPerMinute?: number; config?: Partial<AssistantConfig> } = {}): Rig {
+function rig(options: {
+  dailyUsdLimit?: number; requestsPerMinute?: number; config?: Partial<AssistantConfig>; historySince?: number;
+} = {}): Rig {
   const db = openDatabase(':memory:');
   const clock = { now: () => NOW };
   const dialog = new DialogStore(db);
@@ -72,6 +74,7 @@ function rig(options: { dailyUsdLimit?: number; requestsPerMinute?: number; conf
     dialog, alerts, settings, telemetry, gateway, guard, clock,
     config: { ...CONFIG, ...options.config },
     newId: () => `turn-${++n}`,
+    ...(options.historySince === undefined ? {} : { historySince: options.historySince }),
   });
   return {
     db, gateway, guard, dialog, alerts, telemetry, service,
@@ -157,6 +160,88 @@ describe('AssistantService', () => {
     expect(prompt.system[1].text).toContain('Перегрів двигуна');
     expect(prompt.system[1].text).not.toContain('Старе сповіщення');
     expect(prompt.system[1].text).toContain('Температура масла: 92 °C');
+  });
+
+  test('turns older than historySince never reach the prompt history', async () => {
+    const addTurns = (r: Rig): void => {
+      for (let i = 1; i <= 3; i++) {
+        r.dialog.add({
+          id: `old-${i}`, at: NOW - (10 - i) * 60_000, question: `Питання ${i}`, answer: `Відповідь ${i}`,
+          style: 'full', source: 'panel', model: 'claude-opus-5-5', snapshotAt: null,
+        });
+      }
+    };
+    // Turn 2 is at NOW - 8 min, turn 3 at NOW - 7 min; the current vehicle source started in between.
+    const r = rig({ historySince: NOW - 7.5 * 60_000 });
+    addTurns(r);
+    await r.service.ask({ text: 'Що сталося?' });
+    expect(r.gateway.calls[0].prompt.messages).toEqual([
+      { role: 'user', content: 'Питання 3' }, { role: 'assistant', content: 'Відповідь 3' },
+      { role: 'user', content: 'Що сталося?' },
+    ]);
+
+    // A turn exactly at the cut-off is kept; with the default (0) nothing is cut.
+    const edge = rig({ historySince: NOW - 8 * 60_000 });
+    addTurns(edge);
+    await edge.service.ask({ text: 'Що сталося?' });
+    expect(edge.gateway.calls[0].prompt.messages).toHaveLength(5);
+
+    const none = rig({ historySince: NOW });
+    addTurns(none);
+    await none.service.ask({ text: 'Що сталося?' });
+    expect(none.gateway.calls[0].prompt.messages).toEqual([{ role: 'user', content: 'Що сталося?' }]);
+  });
+
+  test('historySince is also accepted in the config', async () => {
+    const r = rig({ config: { historySince: NOW } });
+    r.dialog.add({
+      id: 'old', at: NOW - 60_000, question: 'Старе', answer: 'Стара відповідь',
+      style: 'full', source: 'panel', model: 'claude-opus-5-5', snapshotAt: null,
+    });
+    await r.service.ask({ text: 'Нове' });
+    expect(r.gateway.calls[0].prompt.messages).toEqual([{ role: 'user', content: 'Нове' }]);
+  });
+
+  test('concurrent questions at the budget edge: the next one is refused while the first is in flight', async () => {
+    const r = rig({ dailyUsdLimit: 0.05 });
+    let finish: () => void = () => undefined;
+    r.gateway.answer = (_prompt, options) => new Promise((resolve) => {
+      finish = () => resolve({ text: 'Відповідь.', model: options.model, usage: USAGE, billed: [{ model: options.model, usage: USAGE }] });
+    });
+    const first = r.service.ask({ text: 'Перше' });
+    const second = await rejection(r.service.ask({ text: 'Друге' }));
+    expect(second.code).toBe('budget-exhausted');
+    expect(r.gateway.calls).toHaveLength(1);
+    finish();
+    await first;
+    // The first answer cost 0.0085 and its reservation is released: the next question is admitted.
+    r.gateway.answer = async (_prompt, options) => ({ text: 'Ще.', model: options.model, usage: USAGE, billed: [{ model: options.model, usage: USAGE }] });
+    await r.service.ask({ text: 'Третє' });
+    expect(r.gateway.calls).toHaveLength(2);
+  });
+
+  test('a failed question releases its reservation', async () => {
+    const r = rig({ dailyUsdLimit: 0.05 });
+    r.gateway.answer = async () => { throw new ClaudeError('overloaded', 'Claude request failed: overloaded', true); };
+    await rejection(r.service.ask({ text: 'Перше' }));
+    r.gateway.answer = async (_prompt, options) => ({ text: 'Так.', model: options.model, usage: USAGE, billed: [{ model: options.model, usage: USAGE }] });
+    await r.service.ask({ text: 'Друге' });
+    expect(r.gateway.calls).toHaveLength(2);
+  });
+
+  test('an aborted request that carries an estimated bill records it once and stores no turn', async () => {
+    const r = rig();
+    const controller = new AbortController();
+    const estimate: BilledAttempt = { model: 'claude-opus-5-5', usage: { inputTokens: 3000, outputTokens: 1000, cacheReadTokens: 1200, cacheWriteTokens: 0 } };
+    r.gateway.answer = (_prompt, options) => new Promise((_resolve, reject) => {
+      options.signal?.addEventListener('abort', () => reject(new ClaudeError('timeout', 'Claude request failed: timeout (aborted)', true, [estimate])));
+    });
+    const pending = r.service.ask({ text: 'Питання' }, undefined, controller.signal);
+    controller.abort();
+    const error = await rejection(pending);
+    expect(error.code).toBe('claude-unavailable');
+    expect(r.usageRows()).toBe(1);
+    expect(r.dialog.recent(10)).toEqual([]);
   });
 
   test('the prompt carries the dated trend summary, or says there is none', async () => {

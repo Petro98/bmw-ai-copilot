@@ -1,8 +1,10 @@
 import {
-  buildPrompt, toClaudeError, userMessageFor,
+  buildPrompt, costUsd, toClaudeError, userMessageFor,
   type ClaudeErrorCode, type ClaudeGateway, type ClaudeResult, type CostGuard, type Effort,
 } from '@copilot/ai-core';
-import { MAX_QUESTION_CHARS, type ApiErrorCode, type AskRequest, type DialogTurn } from '@copilot/shared';
+import {
+  MAX_QUESTION_CHARS, type ApiErrorCode, type AskRequest, type AskSource, type AskStyle, type DialogTurn,
+} from '@copilot/shared';
 import type { Clock } from '@copilot/vehicle-core';
 import type { AlertStore } from '../stores/alert-store';
 import type { DialogStore } from '../stores/dialog-store';
@@ -14,6 +16,8 @@ import { trendSummary } from './trend-summary';
 export interface AssistantConfig {
   model: string; voiceModel: string; effort: Effort; voiceEffort: Effort; maxTokens: number; timeoutMs: number;
   historyTurns: number; vehicleLabel: string | null;
+  /** Same as `AssistantDeps.historySince`; the deps value wins when both are given. */
+  historySince?: number;
 }
 
 /** A question that got no answer. `message` is Ukrainian and safe to display; it never holds a secret. */
@@ -35,6 +39,11 @@ export interface AssistantDeps {
   clock: Clock;
   config: AssistantConfig;
   newId: () => string;
+  /**
+   * Epoch ms: dialog turns stored before this time never reach the prompt history (for example turns answered
+   * from another vehicle source). Default 0, no cut-off.
+   */
+  historySince?: number;
 }
 
 /** Days of roll-ups the trend summary looks at. */
@@ -77,16 +86,36 @@ export class AssistantService {
     if (question.length > MAX_QUESTION_CHARS) throw new AssistantError('validation', MESSAGES.tooLong);
     if (signal?.aborted) throw new AssistantError('claude-unavailable', userMessageFor('timeout'));
 
-    const admission = deps.guard.admit();
+    const style = request.style ?? 'full';
+    const source = request.source ?? 'panel';
+    const spoken = style === 'spoken';
+    const model = spoken ? config.voiceModel : config.model;
+
+    // Worst-case output of this request, reserved while it is in flight so that questions arriving together at
+    // the budget edge are not all admitted. Input is not known yet and is left out of the reservation.
+    const reserveUsd = costUsd(model, { inputTokens: 0, outputTokens: config.maxTokens, cacheReadTokens: 0, cacheWriteTokens: 0 });
+    const admission = deps.guard.admit(reserveUsd);
     if (!admission.allowed) {
       if (admission.reason === 'rate-limit') throw new AssistantError('rate-limited', MESSAGES.rateLimit);
       throw new AssistantError(
         'budget-exhausted', admission.reason === 'daily-budget' ? MESSAGES.dailyBudget : MESSAGES.monthlyBudget,
       );
     }
+    try {
+      return await this.answer(question, style, source, model, onDelta, signal);
+    } finally {
+      deps.guard.release(reserveUsd);
+    }
+  }
 
-    const style = request.style ?? 'full';
-    const source = request.source ?? 'panel';
+  private async answer(
+    question: string, style: AskStyle, source: AskSource, model: string,
+    onDelta: ((text: string) => void) | undefined, signal: AbortSignal | undefined,
+  ): Promise<DialogTurn> {
+    const { deps } = this;
+    const { config } = deps;
+    const spoken = style === 'spoken';
+    const historySince = deps.historySince ?? config.historySince ?? 0;
     const now = deps.clock.now();
     const snapshot = deps.hub.snapshot();
     const prompt = buildPrompt({
@@ -96,17 +125,19 @@ export class AssistantService {
       alerts: deps.alerts.active(),
       limits: deps.settings.get().ownerLimits,
       // lastTurns is oldest first, the order buildPrompt expects.
-      history: deps.dialog.lastTurns(config.historyTurns).map((turn) => ({ question: turn.question, answer: turn.answer })),
+      // Turns from before the current vehicle source never reach the prompt.
+      history: deps.dialog.lastTurns(config.historyTurns)
+        .filter((turn) => turn.at >= historySince)
+        .map((turn) => ({ question: turn.question, answer: turn.answer })),
       trendSummary: trendSummary(deps.telemetry.dailySummaries(TREND_DAYS), utcDay(now)),
       vehicleLabel: config.vehicleLabel,
       now,
     });
-    const spoken = style === 'spoken';
 
     let result: ClaudeResult;
     try {
       result = await deps.gateway.ask(prompt, {
-        model: spoken ? config.voiceModel : config.model,
+        model,
         effort: spoken ? config.voiceEffort : config.effort,
         maxTokens: config.maxTokens,
         timeoutMs: config.timeoutMs,

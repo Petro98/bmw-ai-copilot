@@ -86,6 +86,33 @@ describe('costUsd', () => {
 });
 
 describe('CostGuard', () => {
+  test('a reservation held by an in-flight request refuses the next one at the budget edge until it is released', () => {
+    const { g } = guard({ dailyUsdLimit: 1 });
+    g.record('claude-opus-5-5', usage(0, 35_000));                                 // 0.7 spent
+    expect(g.admit(0.32)).toEqual({ allowed: true });                              // its own reservation never refuses it
+    expect(g.admit(0.32)).toEqual({ allowed: false, reason: 'daily-budget' });     // 0.7 + 0.32 in flight ≥ 1
+    g.release(0.32);
+    expect(g.admit(0.32)).toEqual({ allowed: true });
+    expect(g.totals().dayUsd).toBeCloseTo(0.7, 9);                                 // reservations are not spend
+  });
+
+  test('reservations count toward the monthly budget too', () => {
+    const { g } = guard({ dailyUsdLimit: 5, monthlyUsdLimit: 1 });
+    expect(g.admit(1)).toEqual({ allowed: true });
+    expect(g.admit(1)).toEqual({ allowed: false, reason: 'monthly-budget' });
+  });
+
+  test('a refused admission reserves nothing and a release never goes below zero', () => {
+    const { g, clock } = guard({ dailyUsdLimit: 1, requestsPerMinute: 1 });
+    expect(g.admit(0.6)).toEqual({ allowed: true });
+    expect(g.admit(0.6)).toEqual({ allowed: false, reason: 'rate-limit' });
+    g.release(0.6);
+    g.release(0.6);                                                                // an extra release is harmless
+    clock.t += MINUTE;
+    g.record('claude-opus-5-5', usage(0, 25_000));                                 // 0.5 spent
+    expect(g.admit(0.6)).toEqual({ allowed: true });                               // nothing leaked: 0.5 + 0 < 1
+  });
+
   test('admits until the daily budget is spent, then refuses with daily-budget', () => {
     const { g } = guard({ dailyUsdLimit: 1 });
     expect(g.admit()).toEqual({ allowed: true });

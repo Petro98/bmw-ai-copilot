@@ -26,21 +26,39 @@ export class CostGuard {
   /** Times of admitted requests still inside the rate window; never longer than `requestsPerMinute`. */
   private admitted: number[] = [];
 
+  /** USD reserved by admitted requests whose cost is not recorded yet (in memory only). */
+  private reserved = 0;
+
   constructor(private readonly options: CostGuardOptions) {}
 
-  /** Checks budgets, then the rate. Counts the request toward the per-minute rate only when allowed. */
-  admit(): Admission {
+  /**
+   * Checks budgets, then the rate. Counts the request toward the per-minute rate only when allowed.
+   *
+   * `reserveUsd` (default 0) is the request's worst-case cost. Reservations of requests still in flight count
+   * toward both budgets for later admissions, so that questions arriving together at the budget edge are not all
+   * admitted (check-then-act); a request's own reservation never refuses it. An allowed caller must call
+   * `release(reserveUsd)` once when the request is over, after recording its cost.
+   */
+  admit(reserveUsd = 0): Admission {
     const now = this.options.clock.now();
     const { monthUsd, dayUsd } = this.totalsAt(now);
-    if (monthUsd >= this.options.monthlyUsdLimit) return { allowed: false, reason: 'monthly-budget' };
-    if (dayUsd >= this.options.dailyUsdLimit) return { allowed: false, reason: 'daily-budget' };
+    if (monthUsd + this.reserved >= this.options.monthlyUsdLimit) return { allowed: false, reason: 'monthly-budget' };
+    if (dayUsd + this.reserved >= this.options.dailyUsdLimit) return { allowed: false, reason: 'daily-budget' };
 
     // Entries from the future (the clock jumped backwards) are dropped rather than kept,
     // so a wrong clock cannot lock the assistant out for days.
     this.admitted = this.admitted.filter((t) => t <= now && now - t < RATE_WINDOW_MS);
     if (this.admitted.length >= this.options.requestsPerMinute) return { allowed: false, reason: 'rate-limit' };
     this.admitted.push(now);
+    if (Number.isFinite(reserveUsd) && reserveUsd > 0) this.reserved += reserveUsd;
     return { allowed: true };
+  }
+
+  /** Releases a reservation made by an allowed `admit(reserveUsd)`. Never goes below zero. */
+  release(reserveUsd: number): void {
+    if (!Number.isFinite(reserveUsd) || reserveUsd <= 0) return;
+    this.reserved = Math.max(0, this.reserved - reserveUsd);
+    if (this.reserved < 1e-12) this.reserved = 0;      // floating-point dust
   }
 
   /** Stores the cost of an answered request under the current UTC day and returns it in USD. */

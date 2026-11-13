@@ -39,8 +39,9 @@ export type ClaudeErrorCode =
 
 /**
  * A failed Claude request, already classified. `message` never contains the API key or request headers.
- * `billed` is set when the request was nonetheless billed (a refusal, or an empty answer such as
- * max_tokens with no text), so the cost can still be recorded.
+ * `billed` is set when the request was nonetheless billed (a refusal, an empty answer or one cut off by
+ * max_tokens, or a conservative estimate for a request aborted or timed out after it started streaming),
+ * so the cost can still be recorded.
  */
 export class ClaudeError extends Error {
   constructor(
