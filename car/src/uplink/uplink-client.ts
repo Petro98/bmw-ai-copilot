@@ -41,6 +41,14 @@ export const SEND_INTERVAL_MS = 60_000;
 export const DIALOG_POLL_TIMEOUT_MS = 35_000;
 /** POST /car/v1/ask is one non-streamed reply; the backend may spend up to CLAUDE_TIMEOUT_MS = 60000 on it (plan 1, backend env). */
 export const ASK_TIMEOUT_MS = 70_000;
+/**
+ * The most a snapshot batch's request body may weigh (UTF-8 bytes of the JSON sent). The backend refuses a
+ * car body over 512 kB (CAR_BODY_LIMIT_BYTES = 512 * 1024, apps/backend/src/features/car-link/routes.ts) with
+ * a 400, which blocks background sends; 60 snapshots near the decoder's maxima (~32 kB each) are far larger.
+ */
+export const SNAPSHOT_BATCH_MAX_BYTES = 384_000;
+/** The same for an alert batch. */
+export const ALERT_BATCH_MAX_BYTES = 64_000;
 
 export interface UplinkClientOptions {
   http: HttpsClient;
@@ -94,7 +102,7 @@ export class UplinkClient {
   }
 
   /**
-   * Driving, the interval elapsed and online: one batch of at most 60 snapshots. Not asleep: alerts kept
+   * Driving, the interval elapsed and online: one batch of at most 60 snapshots and SNAPSHOT_BATCH_MAX_BYTES. Not asleep: alerts kept
    * from an earlier failure are sent again, at most once per interval. Otherwise nothing.
    */
   onTick(power: PowerState): void {
@@ -106,8 +114,7 @@ export class UplinkClient {
       const driving = power === 'driving';
       let batchSent = false;
       if (driving && !this.batchInFlight && this.snapshots.size() > 0 && this.elapsed(this.lastBatchAt, now)) {
-        this.sendBatch(bearer, now);
-        batchSent = true;
+        batchSent = this.sendBatch(bearer, now);
       }
       if (this.alertsInFlight || this.alerts.size() === 0) return;
       // a waiting raise, or not driving: at most once per interval; driving, clearings alone go with the minute's
@@ -269,9 +276,44 @@ export class UplinkClient {
     return bearer;
   }
 
-  private sendBatch(bearer: string, now: number): void {
-    const batch = this.snapshots.drain(MAX_SNAPSHOTS_PER_BATCH);
-    if (batch.length === 0) return;
+  /**
+   * Takes items oldest first while the request body `{"<key>":[...]}` stays within `maxBytes` and the batch
+   * within `maxCount`; the rest stay in the buffer for the next send. Each item is measured once and the body's
+   * size is the sum of the items, the commas between them and the wrapper. An item that alone exceeds the
+   * budget (or cannot be serialised) could never be delivered: it is dropped with one warning.
+   */
+  private takeBatch<T>(buffer: RingBuffer<T>, key: string, maxCount: number, maxBytes: number): T[] {
+    const batch: T[] = [];
+    const wrapper = Buffer.byteLength(JSON.stringify({ [key]: [] }), 'utf8');
+    let bytes = wrapper;
+    while (batch.length < maxCount && buffer.size() > 0) {
+      const item = buffer.drain(1)[0];
+      let size: number;
+      try {
+        const text = JSON.stringify(item);
+        size = typeof text === 'string' ? Buffer.byteLength(text, 'utf8') : 4; // undefined is sent as null
+      } catch {
+        size = Infinity;
+      }
+      if (wrapper + size > maxBytes) {
+        this.note('dropped one ' + key + ' item that alone exceeds the ' + maxBytes + ' byte batch limit');
+        continue;
+      }
+      const added = (batch.length > 0 ? 1 : 0) + size;
+      if (bytes + added > maxBytes) {
+        buffer.pushFront([item]); // goes first in the next batch
+        break;
+      }
+      bytes += added;
+      batch.push(item);
+    }
+    return batch;
+  }
+
+  /** Sends the next batch within the count and byte limits; false when nothing was left to send. */
+  private sendBatch(bearer: string, now: number): boolean {
+    const batch = this.takeBatch(this.snapshots, 'snapshots', MAX_SNAPSHOTS_PER_BATCH, SNAPSHOT_BATCH_MAX_BYTES);
+    if (batch.length === 0) return false;
     const body: CarSnapshotBatch = { snapshots: batch };
     this.batchInFlight = true;
     this.lastBatchAt = now;
@@ -284,15 +326,17 @@ export class UplinkClient {
         this.snapshots.pushFront(batch);
       },
     );
+    return true;
   }
 
   private flushAlerts(bearer: string, now: number): void {
-    const batch = this.alerts.drain(ALERT_QUEUE_MAX);
+    const batch = this.takeBatch(this.alerts, 'alerts', ALERT_QUEUE_MAX, ALERT_BATCH_MAX_BYTES);
     if (batch.length === 0) return;
     const body: CarAlertBatch = { alerts: batch };
-    // the whole queue goes, so a raise waiting in it goes too; it waits again only if this send fails
+    // the queue goes oldest first, within the byte limit; a raise waiting in it is the newest, so it is
+    // delivered once the queue is empty, and waits again if this send fails or leaves alerts behind
     const withRaise = this.raiseWaiting;
-    this.raiseWaiting = false;
+    this.raiseWaiting = this.alerts.size() > 0 && withRaise;
     this.alertsInFlight = true;
     this.lastAlertAttemptAt = now;
     this.send(bearer, CAR_API_PREFIX + '/alerts', body).then(

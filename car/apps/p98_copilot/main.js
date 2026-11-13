@@ -4332,6 +4332,8 @@ var ALERT_QUEUE_MAX = 20;
 var SEND_INTERVAL_MS = 6e4;
 var DIALOG_POLL_TIMEOUT_MS = 35e3;
 var ASK_TIMEOUT_MS = 7e4;
+var SNAPSHOT_BATCH_MAX_BYTES = 384e3;
+var ALERT_BATCH_MAX_BYTES = 64e3;
 function isObject2(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -4364,7 +4366,7 @@ var UplinkClient = class {
     }
   }
   /**
-   * Driving, the interval elapsed and online: one batch of at most 60 snapshots. Not asleep: alerts kept
+   * Driving, the interval elapsed and online: one batch of at most 60 snapshots and SNAPSHOT_BATCH_MAX_BYTES. Not asleep: alerts kept
    * from an earlier failure are sent again, at most once per interval. Otherwise nothing.
    */
   onTick(power) {
@@ -4376,8 +4378,7 @@ var UplinkClient = class {
       const driving = power === "driving";
       let batchSent = false;
       if (driving && !this.batchInFlight && this.snapshots.size() > 0 && this.elapsed(this.lastBatchAt, now)) {
-        this.sendBatch(bearer, now);
-        batchSent = true;
+        batchSent = this.sendBatch(bearer, now);
       }
       if (this.alertsInFlight || this.alerts.size() === 0) return;
       const due = batchSent || this.elapsed(this.lastAlertAttemptAt, now) && (this.raiseWaiting || !driving || this.elapsed(this.lastBatchAt, now));
@@ -4534,9 +4535,43 @@ var UplinkClient = class {
     }
     return bearer;
   }
+  /**
+   * Takes items oldest first while the request body `{"<key>":[...]}` stays within `maxBytes` and the batch
+   * within `maxCount`; the rest stay in the buffer for the next send. Each item is measured once and the body's
+   * size is the sum of the items, the commas between them and the wrapper. An item that alone exceeds the
+   * budget (or cannot be serialised) could never be delivered: it is dropped with one warning.
+   */
+  takeBatch(buffer, key, maxCount, maxBytes) {
+    const batch = [];
+    const wrapper = Buffer.byteLength(JSON.stringify({ [key]: [] }), "utf8");
+    let bytes = wrapper;
+    while (batch.length < maxCount && buffer.size() > 0) {
+      const item = buffer.drain(1)[0];
+      let size;
+      try {
+        const text2 = JSON.stringify(item);
+        size = typeof text2 === "string" ? Buffer.byteLength(text2, "utf8") : 4;
+      } catch (e) {
+        size = Infinity;
+      }
+      if (wrapper + size > maxBytes) {
+        this.note("dropped one " + key + " item that alone exceeds the " + maxBytes + " byte batch limit");
+        continue;
+      }
+      const added = (batch.length > 0 ? 1 : 0) + size;
+      if (bytes + added > maxBytes) {
+        buffer.pushFront([item]);
+        break;
+      }
+      bytes += added;
+      batch.push(item);
+    }
+    return batch;
+  }
+  /** Sends the next batch within the count and byte limits; false when nothing was left to send. */
   sendBatch(bearer, now) {
-    const batch = this.snapshots.drain(MAX_SNAPSHOTS_PER_BATCH);
-    if (batch.length === 0) return;
+    const batch = this.takeBatch(this.snapshots, "snapshots", MAX_SNAPSHOTS_PER_BATCH, SNAPSHOT_BATCH_MAX_BYTES);
+    if (batch.length === 0) return false;
     const body = { snapshots: batch };
     this.batchInFlight = true;
     this.lastBatchAt = now;
@@ -4549,13 +4584,14 @@ var UplinkClient = class {
         this.snapshots.pushFront(batch);
       }
     );
+    return true;
   }
   flushAlerts(bearer, now) {
-    const batch = this.alerts.drain(ALERT_QUEUE_MAX);
+    const batch = this.takeBatch(this.alerts, "alerts", ALERT_QUEUE_MAX, ALERT_BATCH_MAX_BYTES);
     if (batch.length === 0) return;
     const body = { alerts: batch };
     const withRaise = this.raiseWaiting;
-    this.raiseWaiting = false;
+    this.raiseWaiting = this.alerts.size() > 0 && withRaise;
     this.alertsInFlight = true;
     this.lastAlertAttemptAt = now;
     this.send(bearer, CAR_API_PREFIX + "/alerts", body).then(

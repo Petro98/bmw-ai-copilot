@@ -3,7 +3,14 @@ import { emptySnapshot, type VehicleSnapshot } from '@copilot/vehicle-core';
 import type { AlertEvent } from '@copilot/event-engine';
 import type { Log } from '../safe';
 import { UplinkError, type HttpsClient, type UplinkErrorKind } from './https-client';
-import { ALERT_QUEUE_MAX, ASK_TIMEOUT_MS, SNAPSHOT_BUFFER_SIZE, UplinkClient } from './uplink-client';
+import {
+  ALERT_BATCH_MAX_BYTES,
+  ALERT_QUEUE_MAX,
+  ASK_TIMEOUT_MS,
+  SNAPSHOT_BATCH_MAX_BYTES,
+  SNAPSHOT_BUFFER_SIZE,
+  UplinkClient,
+} from './uplink-client';
 
 const quietLog: Log = { info() {}, warn() {}, error() {} };
 const MINUTE = 60_000;
@@ -107,6 +114,112 @@ test('a batch holds at most 60 snapshots; an empty buffer sends nothing', async 
   uplink.onTick('driving');
   await settle();
   expect(state.calls.map((c) => c.body.snapshots.length)).toEqual([60, 40]);
+});
+
+/** A snapshot padded with `bytes` bytes of UTF-8 (two bytes per character), so its length in characters is not its size. */
+function bigSnap(n: number, bytes: number): VehicleSnapshot {
+  return { ...emptySnapshot(n), pad: 'ї'.repeat(Math.floor(bytes / 2)) } as unknown as VehicleSnapshot;
+}
+
+const bodyBytes = (body: unknown): number => Buffer.byteLength(JSON.stringify(body), 'utf8');
+
+test('the batch byte budgets stay below the backend\'s 512 kB car body limit', () => {
+  expect(SNAPSHOT_BATCH_MAX_BYTES).toBe(384_000);
+  expect(ALERT_BATCH_MAX_BYTES).toBe(64_000);
+  expect(SNAPSHOT_BATCH_MAX_BYTES).toBeLessThan(512 * 1024);
+});
+
+test('60 large snapshots go out as several batches, each within the byte budget, in order, none lost', async () => {
+  const { uplink, state, clock } = setup();
+  for (let i = 0; i < 60; i++) uplink.recordSnapshot(bigSnap(i, 32_000));
+  for (let m = 0; m < 10 && uplink.queued().snapshots > 0; m++) {
+    uplink.onTick('driving');
+    await settle();
+    clock.t += MINUTE;
+  }
+  expect(uplink.queued().snapshots).toBe(0);
+  expect(state.calls.length).toBeGreaterThan(1);
+  for (const call of state.calls) {
+    expect(call.path).toBe('/car/v1/snapshots');
+    expect(bodyBytes(call.body)).toBeLessThanOrEqual(SNAPSHOT_BATCH_MAX_BYTES);
+  }
+  // full batches: one more snapshot would not have fitted
+  expect(bodyBytes(state.calls[0].body) + 32_000).toBeGreaterThan(SNAPSHOT_BATCH_MAX_BYTES);
+  const sent = state.calls.flatMap((c) => c.body.snapshots.map((s: VehicleSnapshot) => s.takenAt));
+  expect(sent).toEqual(Array.from({ length: 60 }, (_, i) => i));
+});
+
+test('a single snapshot over the byte budget is dropped with one warning and the next one is sent', async () => {
+  const warnings: string[] = [];
+  const { http, state } = fakeHttp();
+  const clock = { t: 1_000_000, now() { return this.t; } };
+  const log: Log = { info() {}, warn: (m: string) => void warnings.push(m), error() {} };
+  const uplink = new UplinkClient({ http, device: () => ({ id: 'device-0001', secret: 'secret-0001' }), clock, log });
+  uplink.recordSnapshot(bigSnap(1, SNAPSHOT_BATCH_MAX_BYTES + 10));
+  uplink.recordSnapshot(snap(2));
+  uplink.onTick('driving');
+  await settle();
+  expect(state.calls).toHaveLength(1);
+  expect(state.calls[0].body.snapshots.map((s: VehicleSnapshot) => s.takenAt)).toEqual([2]);
+  expect(warnings).toHaveLength(1);
+  expect(uplink.queued().snapshots).toBe(0);
+  expect(uplink.status()).toBe('ok');
+});
+
+test('a batch refused after a failure is retried within the budget, not as one oversized batch', async () => {
+  const { uplink, state, clock } = setup({ reply: fail('server-error') });
+  for (let i = 0; i < 30; i++) uplink.recordSnapshot(bigSnap(i, 32_000));
+  uplink.onTick('driving');
+  await settle();
+  state.reply = () => Promise.resolve(undefined);
+  clock.t += MINUTE;
+  uplink.onTick('driving');
+  await settle();
+  expect(state.calls).toHaveLength(2);
+  expect(state.calls[1].body.snapshots[0].takenAt).toBe(0);
+  for (const call of state.calls) expect(bodyBytes(call.body)).toBeLessThanOrEqual(SNAPSHOT_BATCH_MAX_BYTES);
+});
+
+test('small snapshots still go at most 60 per batch, and an ordinary batch is one request', async () => {
+  const { uplink, state, clock } = setup();
+  for (let i = 0; i < 5; i++) uplink.recordSnapshot(snap(i));
+  uplink.onTick('driving');
+  await settle();
+  expect(state.calls).toHaveLength(1);
+  expect(state.calls[0].body.snapshots.map((s: VehicleSnapshot) => s.takenAt)).toEqual([0, 1, 2, 3, 4]);
+  for (let i = 0; i < 61; i++) uplink.recordSnapshot(snap(10 + i));
+  clock.t += MINUTE;
+  uplink.onTick('driving');
+  await settle();
+  expect(state.calls).toHaveLength(2);
+  expect(state.calls[1].body.snapshots).toHaveLength(60);
+  expect(uplink.queued().snapshots).toBe(1);
+});
+
+test('large alerts go out within the alert byte budget, oldest first; an alert alone over it is dropped', async () => {
+  const warnings: string[] = [];
+  const { http, state } = fakeHttp();
+  const clock = { t: 1_000_000, now() { return this.t; } };
+  const log: Log = { info() {}, warn: (m: string) => void warnings.push(m), error() {} };
+  const uplink = new UplinkClient({ http, device: () => ({ id: 'device-0001', secret: 'secret-0001' }), clock, log });
+  state.online = false;
+  uplink.queueAlerts([{ ...alert(0), detail: 'x'.repeat(ALERT_BATCH_MAX_BYTES) }]);
+  for (let i = 1; i <= 10; i++) uplink.queueAlerts([{ ...alert(i), detail: 'ї'.repeat(10_000) }]);
+  state.online = true;
+  for (let m = 0; m < 10 && uplink.queued().alerts > 0; m++) {
+    uplink.onTick('awake');
+    await settle();
+    clock.t += MINUTE;
+  }
+  expect(uplink.queued().alerts).toBe(0);
+  expect(warnings).toHaveLength(1);
+  expect(state.calls.length).toBeGreaterThan(1);
+  for (const call of state.calls) {
+    expect(call.path).toBe('/car/v1/alerts');
+    expect(bodyBytes(call.body)).toBeLessThanOrEqual(ALERT_BATCH_MAX_BYTES);
+  }
+  const sent = state.calls.flatMap((c) => c.body.alerts.map((a: AlertEvent) => a.id));
+  expect(sent).toEqual(Array.from({ length: 10 }, (_, i) => 'a' + (i + 1)));
 });
 
 test('a recorded snapshot is a copy: later changes to the live object are not sent', async () => {

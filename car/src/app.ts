@@ -149,7 +149,7 @@ function uploads(event: AlertEvent): boolean {
   if (event.severity === 'critical' || event.severity === 'warning') return true;
   // a clearing rebuilt after a restart carries severity 'info' and an empty title (rule-runner.ts restoredClearing).
   // Its original severity is not kept anywhere, so it is sent even when the raise was an info alert the phone never
-  // got: the backend then holds a cleared alert with an empty title under an id it did not know (open question).
+  // got: the backend ignores a clearing for an id it does not know, so that upload is harmless.
   return event.active === false && event.title === '';
 }
 
