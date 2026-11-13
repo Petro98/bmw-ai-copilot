@@ -1,0 +1,19 @@
+{
+  "id": "p98_copilot",
+  "title": "Copilot",
+  "version": "0.1.0",
+  "license": "MIT",
+  "loggingId": "OAPC",
+  "startType": "autostart",
+  "mguInternet": true,
+  "mguHmi": ["ID7"],
+  "memoryKB": 131072,
+  "cpuLimit": 30,
+  "signals": {},
+  "screens": [
+    { "name": "MAIN", "kind": "canvas", "title": "Copilot" }
+  ],
+  "popups": [
+    { "name": "ALERT_POP", "type": "popUp", "widget": "LT_State_PopupSmall", "label": "text3", "button": "OK" }
+  ]
+}

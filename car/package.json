@@ -2,8 +2,10 @@
   "name": "car",
   "version": "0.1.0",
   "private": true,
+  "description": "Head-unit app (Node 8.16.2): TypeScript in src/, bundled to apps/p98_copilot/main.js for the vendored MIT app kit.",
   "license": "MIT",
   "scripts": {
-    "test": "vitest run --passWithNoTests"
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run"
   }
 }

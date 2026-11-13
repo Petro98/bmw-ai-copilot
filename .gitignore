@@ -4,6 +4,9 @@ dist/
 .angular/
 coverage/
 *.tsbuildinfo
+# head-unit app: kit build staging (car/dist/ is covered by dist/ above) and offline preview PNGs
+car/build/
+car/preview/
 
 # secrets and local config — never commit
 .env
@@ -28,3 +31,6 @@ reference/someip-interfaces.json
 .idea/
 .vscode/
 .DS_Store
+
+# browser automation scratch
+.playwright-mcp/
