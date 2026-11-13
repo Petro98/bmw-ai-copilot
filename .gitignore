@@ -1,0 +1,30 @@
+# dependencies / build output
+node_modules/
+dist/
+.angular/
+coverage/
+*.tsbuildinfo
+
+# secrets and local config — never commit
+.env
+.env.*
+!.env.example
+
+# local data
+*.sqlite
+*.sqlite-journal
+*.db
+data/
+
+# raw research notes kept locally (not published)
+.research/
+
+# never commit BMW proprietary material or anything identifying the car
+oap-sdk/
+reference/someip-interfaces.json
+*.mgu
+
+# editor / OS
+.idea/
+.vscode/
+.DS_Store
