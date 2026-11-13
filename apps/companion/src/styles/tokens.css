@@ -1,0 +1,59 @@
+/*
+ * Design tokens, copied name for name and value for value from docs/design/tokens.json.
+ * Change them there first; this file must stay identical.
+ */
+:root {
+  /* colour */
+  --ground: #05070a;
+  --surface: #0e1217;
+  --surface-raised: #171d25;
+  --line: #2c3642;
+  --line-strong: #647283;
+  --ink: #f2f5f8;
+  --ink-dim: #a3afbc;
+  --signal: #6fc3ff;
+  --on-signal: #04121f;
+  --warning: #ffc24a;
+  --on-warning: #1f1300;
+  --critical: #ff5647;
+  --on-critical: #240603;
+
+  /* spacing */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 16px;
+  --space-4: 24px;
+  --space-5: 40px;
+
+  /* radius */
+  --radius-sm: 6px;
+  --radius-md: 12px;
+  --radius-pill: 999px;
+}
+
+/* type: one class per text style, family "sans" */
+
+.reading-xl,
+.reading,
+.answer-driving,
+.answer,
+.title,
+.label,
+.phone-title,
+.phone-body,
+.phone-label {
+  font-family: "Ubuntu Sans", Ubuntu, system-ui, sans-serif;
+}
+
+/* Car screen */
+.reading-xl { font-size: 72px; line-height: 76px; font-weight: 300; }
+.reading { font-size: 44px; line-height: 48px; font-weight: 400; }
+.answer-driving { font-size: 34px; line-height: 46px; font-weight: 400; }
+.answer { font-size: 24px; line-height: 36px; font-weight: 400; }
+.title { font-size: 28px; line-height: 34px; font-weight: 500; }
+.label { font-size: 18px; line-height: 22px; font-weight: 500; letter-spacing: 0.08em; }
+
+/* Phone */
+.phone-title { font-size: 22px; line-height: 28px; font-weight: 500; }
+.phone-body { font-size: 17px; line-height: 26px; font-weight: 400; }
+.phone-label { font-size: 13px; line-height: 16px; font-weight: 500; letter-spacing: 0.08em; }

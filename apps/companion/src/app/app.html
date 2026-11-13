@@ -1,0 +1,44 @@
+<div class="shell">
+  <header class="top-bar">
+    <span class="phone-title">{{ heading() }}</span>
+    <div class="marks phone-label">
+      <span class="mark" data-mark="vehicle" [attr.data-state]="vehicleOk() ? 'on' : 'off'">
+        @if (vehicleOk()) {
+          <svg class="mark-icon on" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg>
+        } @else {
+          <svg class="mark-icon off" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12h12"></path></svg>
+        }
+        АВТО
+        <span class="visually-hidden">{{ vehicleOk() ? 'підключено' : 'не підключено' }}</span>
+      </span>
+      <span class="mark" data-mark="claude" [attr.data-state]="claudeOk() ? 'on' : 'off'">
+        @if (claudeOk()) {
+          <svg class="mark-icon on" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg>
+        } @else {
+          <svg class="mark-icon off" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12h12"></path></svg>
+        }
+        CLAUDE
+        <span class="visually-hidden">{{ claudeOk() ? 'підключено' : 'не підключено' }}</span>
+      </span>
+    </div>
+  </header>
+
+  <main class="content">
+    <router-outlet />
+  </main>
+
+  <nav class="tabs" aria-label="Розділи">
+    <a class="tab" routerLink="/" routerLinkActive="active" [routerLinkActiveOptions]="{ exact: true }" ariaCurrentWhenActive="page">
+      <svg aria-hidden="true" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0"></path><path d="M12 18v3"></path></svg>
+      Голос
+    </a>
+    <a class="tab" routerLink="/car" routerLinkActive="active" ariaCurrentWhenActive="page">
+      <svg aria-hidden="true" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"></path></svg>
+      Авто
+    </a>
+    <a class="tab" routerLink="/settings" routerLinkActive="active" ariaCurrentWhenActive="page">
+      <svg aria-hidden="true" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h8"></path><path d="M18 7h2"></path><path d="M4 17h2"></path><path d="M12 17h8"></path><circle cx="15" cy="7" r="2.5"></circle><circle cx="9" cy="17" r="2.5"></circle></svg>
+      Налаштування
+    </a>
+  </nav>
+</div>
