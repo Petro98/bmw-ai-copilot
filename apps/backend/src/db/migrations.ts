@@ -79,6 +79,13 @@ export const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX usage_day ON usage (day);
   `,
+  // 2: the event engine's dwell/cooldown memory (EngineState as JSON), one row, so a restart keeps alert ids.
+  `
+  CREATE TABLE engine_state (
+    id    INTEGER PRIMARY KEY CHECK (id = 1),
+    state TEXT NOT NULL
+  );
+  `,
 ];
 
 /** Applies every migration the database has not seen yet. Safe to call any number of times. */
