@@ -31,7 +31,7 @@ From mgu-apps `kit/` at the commit above, unchanged unless listed under "Local c
   `fonts/` (`bold.json`, `cjk.json`, `gear.json`, `label.json`, `light.json`, `num.json`, `OFL-NotoSansSC.txt`,
   `UFL-Ubuntu.txt`)
 - `tools/`: `bake_fonts.py`, `build.py` (changed, below), `extract_sdk.js`, `locale-revisions.json`, `localize.py`,
-  `make_icon.js`, `oapgen/gen.js`, `pack_data.py`, `test_life.js`, `test_runtime.js`
+  `make_icon.js`, `oapgen/gen.js`, `pack_data.py`, `test_life.js`, `test_runtime.js` (cases added, below)
 
 `LICENSE.mgu-apps` is mgu-apps' own root `LICENSE` (JustAnotherPU), unchanged.
 
@@ -59,8 +59,9 @@ iDrive Monitor app, which is not here).
 
 ## Local changes
 
-Edits 1-3 are in `tools/build.py`, edit 4 in `runtime/signals.js`, edit 5 in `runtime/fonts.js`, edit 6 in
-`runtime/mgu.js`, edit 7 in `runtime/display.js`; each is marked in the source with `[car/kit local edit N]`:
+Edits 1-3 and 8 are in `tools/build.py`, edit 4 in `runtime/signals.js`, edit 5 in `runtime/fonts.js`, edit 6 in
+`runtime/mgu.js`, edit 7 in `runtime/display.js`, edit 9 in `runtime/display.js` and `runtime/mgu.js`; each is marked
+in the source with `[car/kit local edit N]`, and so are the cases `tools/test_runtime.js` gained for edits 7 and 9:
 
 1. `--preview-only`: stages the app without BMW's `oap-sdk` and stops before the installable archives, for the
    offline preview; without the flag a missing `oap-sdk` stops the build with a message. Ported from idrive7-apps
@@ -89,7 +90,7 @@ Edits 1-3 are in `tools/build.py`, edit 4 in `runtime/signals.js`, edit 5 in `ru
      drew. Now both paths run about `fps` turns a second (`setTimeout(tick, max(15, 1000 / fps - dt))`), and a
      renderer tick only schedules the next turn when none is pending. The screen asks for 4.
    `tools/hu-stub.js` keeps upstream's copy of the loop for the emulator (`liveLoop`, not used by the preview).
-7. `runtime/display.js` (lines 109-119, 156, 165-167, 169-172, 183-189, 214-215, 225-244, 810-829, 849-850), so nothing of
+7. `runtime/display.js` (lines 109-119, 156, 165-167, 169-172, 183-189, 214-215, 225-244, 811-830, 850-851), so nothing of
    the display runs while the screen is hidden, it logs nothing periodically, and the kit never takes the iDrive
    controller (spec §6.4: no controller gate, no controller grab):
    - the renderer keep-alive interval (500 ms; it re-sends the last frame at least once a second, or the
@@ -113,8 +114,27 @@ Edits 1-3 are in `tools/build.py`, edit 4 in `runtime/signals.js`, edit 5 in `ru
      is shown); the "no mgu-renderd socket" line is said once;
    - the "display: N fps sent" line, upstream `log.info` every 10 s while frames are sent, is `log.debug`.
    The kit's own `node car/kit/tools/test_runtime.js` (the unchanged-frame skip and its one-a-second keep-alive
-   among them) still passes. The hide/show keep-alive, the grab and the hidden reconnect were checked with a
-   scratch script on the same stand-in renderer; `tools/test_runtime.js` is vendored and has no case for them yet.
+   among them) still passes, and has four cases for this edit on the same stand-in renderer (its stand-in now
+   also counts connections and records each message's type): the keep-alive only while the screen shows and only
+   with a renderer; the keep-alive going on after a short hide and show; no controller grab by the kit (no grab
+   timer, no `GRAB` message) while an app that asks still gets it; no renderer reconnect while hidden (lost while
+   hidden, unreachable then hidden, an app that starts hidden), and the renderer found again once shown. Undoing
+   any one of the four changes above makes its case fail.
+8. `tools/build.py` (lines 485-488): the Ukrainian glyph atlas `localization/fonts/cyrillic-uk.json` and its
+   licence notice `localization/fonts/UFL-Ubuntu.txt` are copied into every package's `kit/fonts/`, where
+   `runtime/fonts.js` reads the atlas (edit 5). Upstream copies `localization/fonts/` only for a Russian build, so
+   the installable package had no Ukrainian atlas and every Cyrillic string would have been drawn blank on the
+   car. Tested in `car/test/package.test.ts` (the staged package, and its `kit/fonts.js` drawing `Ї` and `□`).
+9. The kit's own words on the screen, in Ukrainian like the app's (the plan's rule for interface copy):
+   `runtime/display.js` `_tabList` (lines 259-260) names the header's Settings tab «Налаштування» (upstream
+   'Settings'); `runtime/mgu.js` `Settings.display` (line 126) gives a switch's value as «Увімкнено» / «Вимкнено»
+   (upstream 'On' / 'Off'), and the settings sheet is opened with the title «Налаштування» (line 467; upstream
+   `null`, which `runtime/sheet.js` makes 'Settings'). The kit's language mechanism (`build.py --language` with a
+   `runtime/locales/<tag>.json` catalog through `runtime/i18n.js`) was not used: the catalogs are not vendored,
+   the MGU Store builds with `build.py {id}` only (`mgu-repo.json`), and a non-English build renames the package
+   version (`0.1.0-uk.1`, `tools/localize.py` `package_version`), which no longer matches the Store's
+   `car/dist/{id}@{version}.tgz`. Tested in `tools/test_runtime.js`. `runtime/sheet.js` still draws 'Version …',
+   'Done', 'Back' and 'Close' in English (not changed here).
 
 ## Fonts and code added for this project (Plan 2 Task 8)
 
@@ -131,10 +151,9 @@ Edits 1-3 are in `tools/build.py`, edit 4 in `runtime/signals.js`, edit 5 in `ru
   into the repository. Only the baked atlas is committed, with the licence next to it:
   `localization/fonts/UFL-Ubuntu.txt` (byte for byte the same as `runtime/fonts/UFL-Ubuntu.txt` and the `UFL.txt`
   of that Google Fonts folder).
-- The package: the kit's `fonts.js` reads the atlas from `kit/fonts/cyrillic-uk.json` in the package. `tools/build.py`
-  copies `localization/fonts/` only for a Russian build, so `car/scripts/preview-car.sh` puts the atlas there for
-  the offline preview; the installable build needs the same copy in `build.py` (reported to the plan's owner, not
-  changed here).
+- The package: the kit's `fonts.js` reads the atlas from `kit/fonts/cyrillic-uk.json` in the package; `tools/build.py`
+  puts it there, with its licence notice, in every build (local edit 8), and `car/scripts/preview-car.sh` checks it
+  is there.
 - QR code generator: `car/src/ui/qr-nayuki.ts` is Project Nayuki's QR Code generator library (MIT,
   `Copyright (c) Project Nayuki`), `typescript-javascript/qrcodegen.ts` of
   https://github.com/nayuki/QR-Code-generator at commit `8329a7108fc22be3e1eec0a9f9318978579e3621`
@@ -159,7 +178,8 @@ The kit was read before any of it ran here. Things it does beyond drawing:
   `/run/mgu-render/render.sock`) when one exists; no network.
 - `runtime/display.js`: without a renderer socket it checks for one every 5 s while the screen shows; with a
   renderer it keeps a 500 ms keep-alive interval (unref'd) while the screen shows; it never takes the iDrive
-  controller on its own and keeps no renderer connection that is not up while the screen is hidden (local edit 7). `signals.watch` with `pollMs` starts an interval that the watch's
+  controller on its own and keeps no renderer connection that is not up while the screen is hidden (local edit 7;
+  `tools/test_runtime.js` has a case for each). `signals.watch` with `pollMs` starts an interval that the watch's
   `shutdown()` clears (local edit 4; upstream never clears it).
 - `runtime/mgu.js`: writes a rotating log file in the app's data folder, removes its own old frame files from
   `rhmiData/resources`, and exits the process when MainApp asks it to shut down or on an uncaught exception.

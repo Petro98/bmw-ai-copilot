@@ -256,7 +256,8 @@ class Display {
     _tabList() {
         const base = this.tabInfo || { tabs: [], sel: -1, badges: [] };
         const tabs = (base.tabs || []).slice();
-        const settings = this.own() && this.hasSettings() ? tabs.push('Settings') - 1 : -1;
+        // [car/kit local edit 9] the tab's name in Ukrainian (upstream 'Settings'): the app's screens are Ukrainian
+        const settings = this.own() && this.hasSettings() ? tabs.push('Налаштування') - 1 : -1;
         const sel = this.sheet && this.sheet.settings ? settings : this.sheet ? -1 : base.sel;
         return { tabs, sel, badges: base.badges || [], settings };
     }

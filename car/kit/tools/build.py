@@ -482,6 +482,10 @@ def build(app_id, language='en', preview_only=False):
             p = os.path.join(src, 'javascript', 'kit', 'locales', name)
             if os.path.exists(p):
                 os.remove(p)
+    # [car/kit local edit 8] the Ukrainian atlas (kit/tools/bake_ukrainian.py) and its Ubuntu Font Licence go
+    # into every package, where kit/fonts.js reads it (local edit 5); without it Cyrillic text is drawn blank
+    for name in ('cyrillic-uk.json', 'UFL-Ubuntu.txt'):
+        shutil.copy(os.path.join(KIT, 'localization', 'fonts', name), os.path.join(src, 'javascript', 'kit', 'fonts', name))
     if language == 'ru':
         shutil.copy(os.path.join(KIT, 'localization', 'fonts', 'cyrillic-ru.json'),
                     os.path.join(src, 'javascript', 'kit', 'fonts', 'cyrillic.json'))

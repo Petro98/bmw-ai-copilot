@@ -24,14 +24,10 @@ rm -rf "$out"
 mkdir -p "$out"
 
 # -I: isolated mode (no user site-packages, no PYTHON* variables); build.py finds its own modules.
+# It puts the Ukrainian glyph atlas in kit/fonts/cyrillic-uk.json, where the kit's fonts.js looks for it,
+# in every build (car/kit/VENDORED.md, local edits 5 and 8); the preview checks it is there.
 python3 -I "$car_dir/kit/tools/build.py" --preview-only "$app_id"
-
-# The Ukrainian glyph atlas: the staged kit gets it as kit/fonts/cyrillic-uk.json, where the kit's fonts.js
-# looks for it (car/kit/VENDORED.md, local edit 5). build.py does not copy kit/localization/fonts/ for an
-# English build yet; until it does, the preview puts the atlas in place itself.
-if [ ! -f "$kit_js/fonts/cyrillic-uk.json" ]; then
-  cp "$car_dir/kit/localization/fonts/cyrillic-uk.json" "$kit_js/fonts/cyrillic-uk.json"
-fi
+[ -f "$kit_js/fonts/cyrillic-uk.json" ] || { echo "preview-car: the staged kit has no Ukrainian atlas" >&2; exit 1; }
 
 # 1. the shipped app: `render` draws one frame of the screen shown (the kit's ctx.loop function for MAIN)
 (cd "$out" && node "$car_dir/kit/tools/preview.js" "$stage" "$out" render)

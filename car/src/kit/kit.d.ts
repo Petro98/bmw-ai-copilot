@@ -52,6 +52,20 @@ export interface KitTextOptions {
   literal?: boolean;
 }
 
+/** The page's tabs as gauges.js frame() hands them to the header (canvas.chrome.tabs). */
+export interface KitChromeTabs { tabs: string[]; sel: number; badges: unknown[] }
+
+/**
+ * The renderer placement (car/kit/runtime/display.js _place), in screen px: the surface (x, y, w, h), the page's
+ * scale and offset (ox, oy), whether it is the full-screen layout; on that layout without the kit's bar also extra
+ * (logical px below the page) and oyMid / oyTop (the page centred / starting at the top).
+ */
+export interface KitPlacement {
+  readonly x: number; readonly y: number; readonly w: number; readonly h: number;
+  readonly scale: number; readonly ox: number; readonly oy: number; readonly full: boolean;
+  readonly extra?: number; readonly oyMid?: number; readonly oyTop?: number;
+}
+
 /** A cached layer made by the kit's gauges.layer() / record.makeLayer(). */
 export interface KitLayer { readonly layerId: number; readonly w: number; readonly h: number }
 
@@ -70,6 +84,17 @@ export interface KitCanvas {
   readonly own: boolean;
   /** a page that scrolls: true, or { y, bar } for a list from y down (ctx.onScroll) */
   scroll: boolean | { y: number; bar: { x: number; y: number; w: number; h: number } };
+  /**
+   * Set by the display on every ctx.canvas() (car/kit/runtime/display.js canvas; record.js Recorder does not
+   * declare it): on the full-screen layout (GPU renderer active, place.full, a screen without "chrome": false)
+   * { tabs: null }, into which the kit's G.frame puts the page's tabs for the header (gauges.js frame); else null.
+   */
+  readonly chrome: { tabs: KitChromeTabs | null } | null;
+  /**
+   * Set by the display on every ctx.canvas() (display.js canvas): where the frame lands on the screen while the
+   * GPU renderer path is active (display.js _place), else null (the software path).
+   */
+  readonly place: KitPlacement | null;
 
   /** Something on the page a tap or the controller can press: run() is called; key names it across frames. */
   target(x: number, y: number, w: number, h: number, run: () => unknown, key: string, r?: number, turn?: (detents: number) => void): this;
@@ -202,7 +227,10 @@ export interface KitContext {
   onLayout(fn: () => void): void;
   /** the surface for one frame (reused between calls): pass it to ui.image */
   canvas(w: number, h: number): KitCanvas;
-  /** Runs fn while screen stateName is visible: once per renderer refresh on the GPU path, else about fps a second. */
+  /**
+   * Runs fn while screen stateName is visible, about fps times a second on both paths, the GPU renderer's and
+   * the software one (mgu.js loop, car/kit local edit 6: upstream ran fn on every renderer tick on the GPU path).
+   */
   loop(stateName: string, fps: number, fn: () => unknown): KitLoop;
 }
 

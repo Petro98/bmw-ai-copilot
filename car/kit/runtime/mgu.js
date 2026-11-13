@@ -123,7 +123,7 @@ class Settings {
         if (!s) return String(v);
         if (s.type === 'choice') { const o = (s.options || []).find((x) => x[0] === v); return o ? o[1] : String(v); }
         if (s.type === 'number') return (s.labels && s.labels[String(v)] !== undefined ? s.labels[String(v)] : String(v) + (s.unit ? ' ' + s.unit : '')) + (s.markDefault && v === s.default ? ' (default)' : '');
-        if (s.type === 'bool') return v ? 'On' : 'Off';
+        if (s.type === 'bool') return v ? 'Увімкнено' : 'Вимкнено';   // [car/kit local edit 9] upstream 'On' / 'Off'
         return String(v);
     }
     /** Advance a choice/number setting to its next value (wraps). */
@@ -464,7 +464,7 @@ function wireSettings(ctx) {
         ui.onClick('BTN_SETTINGS', () => {
             const d = ctx.display;
             if (d.sheet && d.sheet.settings) { d.closeSheet(); return null; }
-            const sh = listSheet(settings, null, { version: SPEC.version });
+            const sh = listSheet(settings, 'Налаштування', { version: SPEC.version });   // [car/kit local edit 9] upstream null: 'Settings'
             sh.settings = true;
             sh.onClose = () => refresh();
             if (d.openSheet(sh)) return null;
