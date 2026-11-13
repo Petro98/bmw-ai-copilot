@@ -106,6 +106,20 @@ The car and its owner's setup (from the owner, 2026-11-13)
   and any recovery or re-installation after a BMW software update goes through that service
   station.
 - Phone: Android, connected through Android Auto.
+- Internet in the car comes from that same phone: the owner shares the phone's mobile data over
+  its Wi-Fi hotspot and the head unit joins it through the Store's uplink. Consequences:
+  - The uplink is already set up and in daily use, so the car is online exactly when the phone
+    is in the car with its hotspot on — the same moments the voice companion is available. With
+    no phone, the car app is offline and only the local parts work (readings, rules, pop-ups).
+  - Everything the car sends travels over the phone's mobile data. The planned traffic (one
+    small request a minute while driving, plus questions) is negligible, and that budget must
+    stay small.
+  - Phone and car share a local network, but the head unit accepts no inbound connections on
+    the uplink, and a web app on the phone cannot listen on a port. So the path stays
+    car → backend → phone. A native phone app that the car calls directly over the hotspot is a
+    possible later simplification, not part of this design.
+  - If Android Auto is wireless, the head unit's Wi-Fi radio serves both Android Auto and the
+    uplink; community reports link that combination to brief audio skips. To observe (§12).
 
 Platform
 
@@ -470,7 +484,8 @@ Before any of our code is installed
    and what is their procedure before and after a BMW software update?
 3. iDrive Monitor → "Test pop-up": does the pop-up appear; does it also appear while navigation
    or CarPlay is in front? Note CPU %, free memory and app memory versus cap at idle.
-4. Store → Settings → Wi-Fi: uplink online over the phone's hotspot; any CarPlay audio skips?
+4. Uplink over the phone's hotspot (already in use): how long after ignition-on until the Store
+   shows "Online" without touching anything; any audio skips while Android Auto plays music.
 5. Head-unit clock versus real time.
 6. Centre display size (10.25" or 12.3"), audio system option, whether Android Auto is wired or
    wireless, and which units the car displays (°C/°F, bar/psi, km/miles).
