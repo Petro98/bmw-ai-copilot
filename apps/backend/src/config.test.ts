@@ -1,6 +1,6 @@
 import { Writable } from 'node:stream';
 import { describe, expect, test } from 'vitest';
-import { MIN_CLAUDE_MAX_TOKENS, loadConfig } from './config';
+import { assistantConfigFrom, MIN_CLAUDE_MAX_TOKENS, loadConfig } from './config';
 import { createLogger } from './logger';
 
 // A made-up key shape: never a real credential.
@@ -74,6 +74,11 @@ describe('loadConfig', () => {
   test('the car source is accepted since the car link exists (Plan 2 Task 7); anything else is refused', () => {
     expect(loadConfig({ VEHICLE_SOURCE: 'car' }).vehicleSource).toBe('car');
     expect(() => loadConfig({ VEHICLE_SOURCE: 'bus' })).toThrow(/VEHICLE_SOURCE/);
+  });
+
+  test('the assistant is told it runs the demo vehicle exactly when the vehicle source is mock', () => {
+    expect(assistantConfigFrom(loadConfig({})).demo).toBe(true);
+    expect(assistantConfigFrom(loadConfig({ VEHICLE_SOURCE: 'car' })).demo).toBe(false);
   });
 
   test('ALLOW_VEHICLE_SOURCE_RESET is off by default, accepts 1/true (and 0/false) and refuses anything else', () => {

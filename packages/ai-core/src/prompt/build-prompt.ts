@@ -153,7 +153,7 @@ function limitsSection(limits: OwnerLimits): string {
  * Builds the request prompt.
  * `system[0]` is `STATIC_INSTRUCTIONS` with the only `cache_control`; `system[1]` carries the
  * volatile context in a fixed order (style and motion with the length rule, the demonstration-data
- * warning when any reading comes from the mock source, vehicle label, «ДАНІ АВТО», «АКТИВНІ СПОВІЩЕННЯ»
+ * warning when the vehicle source is the demo one or any reading comes from the mock source, vehicle label, «ДАНІ АВТО», «АКТИВНІ СПОВІЩЕННЯ»
  * (newest 20, each with its raise time), «ЛІМІТИ ВЛАСНИКА», «ІСТОРІЯ»). Vehicle text only ever appears
  * inside `system[1]`, as data.
  * `messages`: `input.history` (expected oldest first) as user/assistant pairs, then the question,
@@ -162,7 +162,7 @@ function limitsSection(limits: OwnerLimits): string {
 export function buildPrompt(input: PromptInput): BuiltPrompt {
   const sections: string[] = [headerLine(input)];
   // Per request, never in the cached block: scripted readings must not be presented as the car's own.
-  if (hasMockReading(input.snapshot)) sections.push(DEMO_LINE);
+  if (input.demo === true || hasMockReading(input.snapshot)) sections.push(DEMO_LINE);
   if (input.vehicleLabel !== null && promptSafeText(input.vehicleLabel) !== '') {
     sections.push(`АВТО: ${promptSafeText(input.vehicleLabel)}`);
   }

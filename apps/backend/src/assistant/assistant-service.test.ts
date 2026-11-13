@@ -56,6 +56,7 @@ interface Rig {
 
 function rig(options: {
   dailyUsdLimit?: number; requestsPerMinute?: number; config?: Partial<AssistantConfig>; historySince?: number;
+  snapshot?: () => VehicleSnapshot;
 } = {}): Rig {
   const db = openDatabase(':memory:');
   const clock = { now: () => NOW };
@@ -70,7 +71,7 @@ function rig(options: {
   const gateway = new FakeGateway();
   let n = 0;
   const service = new AssistantService({
-    hub: { snapshot },
+    hub: { snapshot: options.snapshot ?? snapshot },
     dialog, alerts, settings, telemetry, gateway, guard, clock,
     config: { ...CONFIG, ...options.config },
     newId: () => `turn-${++n}`,
@@ -190,6 +191,16 @@ describe('AssistantService', () => {
     addTurns(none);
     await none.service.ask({ text: 'Що сталося?' });
     expect(none.gateway.calls[0].prompt.messages).toEqual([{ role: 'user', content: 'Що сталося?' }]);
+  });
+
+  test('with the demo source the prompt names the data as a demo even when nothing is available', async () => {
+    const nothing = (): VehicleSnapshot => emptySnapshot(TAKEN_AT);    // the demo scenario «Сигнали відсутні»
+    const r = rig({ config: { demo: true }, snapshot: nothing });
+    await r.service.ask({ text: 'Як авто?' });
+    expect(r.gateway.calls[0].prompt.system[1].text).toContain('демонстраційні');
+    const real = rig({ config: { demo: false }, snapshot: nothing });
+    await real.service.ask({ text: 'Як авто?' });
+    expect(real.gateway.calls[0].prompt.system[1].text).not.toContain('демонстраційні');
   });
 
   test('historySince is also accepted in the config', async () => {

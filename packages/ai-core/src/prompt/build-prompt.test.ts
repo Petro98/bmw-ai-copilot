@@ -316,6 +316,15 @@ describe('buildPrompt', () => {
     expect(buildPrompt(input({ snapshot: list })).system[1].text).toContain('демонстраційні');
   });
 
+  test('the demo source is named even when no reading is available (scenario «Сигнали відсутні»)', () => {
+    const nothing = emptySnapshot(NOW);
+    const withAlert = { alerts: [alert({ id: 'demo', title: 'Температура двигуна. Обережно зупиніться' })] };
+    expect(buildPrompt(input({ snapshot: nothing, ...withAlert })).system[1].text).not.toContain('демонстраційні');
+    const demo = buildPrompt(input({ snapshot: nothing, ...withAlert, demo: true }));
+    expect(demo.system[1].text).toContain('УВАГА: дані авто й сповіщення нижче демонстраційні');
+    expect(demo.system[0].text).toBe(STATIC_INSTRUCTIONS);
+  });
+
   test('each active alert line says when it was raised', () => {
     const text = buildPrompt(input({
       alerts: [

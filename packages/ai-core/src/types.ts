@@ -9,6 +9,8 @@ export interface PromptInput {
   question: string; style: AnswerStyle; snapshot: VehicleSnapshot; alerts: AlertEvent[];
   limits: OwnerLimits; history: HistoryTurn[]; trendSummary: string | null;
   vehicleLabel: string | null; now: number;
+  /** True when the backend runs the demonstration (mock) vehicle; the prompt then always says the data is a demo. */
+  demo?: boolean;
 }
 
 export interface SystemBlock { type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }

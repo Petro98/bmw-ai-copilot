@@ -212,5 +212,6 @@ export function assistantConfigFrom(config: Config): AssistantConfig {
     timeoutMs: config.claudeTimeoutMs,
     historyTurns: config.historyTurns,
     vehicleLabel: config.vehicleLabel,
+    demo: config.vehicleSource === 'mock',
   };
 }

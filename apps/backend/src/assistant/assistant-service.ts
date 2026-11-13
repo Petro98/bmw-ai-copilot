@@ -16,6 +16,8 @@ import { trendSummary } from './trend-summary';
 export interface AssistantConfig {
   model: string; voiceModel: string; effort: Effort; voiceEffort: Effort; maxTokens: number; timeoutMs: number;
   historyTurns: number; vehicleLabel: string | null;
+  /** True when the vehicle source is the demonstration (mock) one: every prompt then names the data as a demo. */
+  demo?: boolean;
   /** Same as `AssistantDeps.historySince`; the deps value wins when both are given. */
   historySince?: number;
 }
@@ -132,6 +134,7 @@ export class AssistantService {
       trendSummary: trendSummary(deps.telemetry.dailySummaries(TREND_DAYS), utcDay(now)),
       vehicleLabel: config.vehicleLabel,
       now,
+      demo: config.demo === true,
     });
 
     let result: ClaudeResult;
