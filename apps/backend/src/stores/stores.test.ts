@@ -315,9 +315,11 @@ describe('vehicle source record (migration 4)', () => {
       db.exec("INSERT INTO devices VALUES ('d', 'l', 'h', 1, NULL)");
 
       expect(claimVehicleSource(db, 'car', 3000)).toEqual({ source: 'car', previous: 'mock', since: 3000, reset: true });
+      // demo -> car: demonstration alerts must not appear in the car's history at all.
       expect(alerts.active()).toEqual([]);
-      expect(alerts.get('active')).toEqual(alert({ id: 'active', active: false, clearedAt: 3000 }));
-      expect(alerts.get('old')?.clearedAt).toBe(1500);
+      expect(alerts.get('active')).toBeNull();
+      expect(alerts.get('old')).toBeNull();
+      expect(db.prepare('SELECT COUNT(*) AS n FROM alert_events').get()?.n).toBe(0);
       expect(telemetry.dailySummaries(30)).toEqual([]);
       expect(db.prepare('SELECT COUNT(*) AS n FROM telemetry_samples').get()?.n).toBe(0);
       expect(db.prepare('SELECT COUNT(*) AS n FROM engine_state').get()?.n).toBe(0);

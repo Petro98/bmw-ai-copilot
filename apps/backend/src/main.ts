@@ -82,16 +82,20 @@ export async function start(env: NodeJS.ProcessEnv, runtime: StartRuntime = {}):
 async function wire(
   config: Config, logger: Logger, db: DatabaseSync, clock: Clock, timers: TimerApi, injected: VehicleDataProvider | undefined,
 ): Promise<() => Promise<void>> {
-  // Before any store reads the database: vehicle data of another source (the demo before the car, or the reverse) is
-  // reset, and dialog turns from before the current source began are kept out of the prompt.
+  // Before any store reads the database and before the server listens: the demo's vehicle data is removed when the car
+  // takes over; a demo start on the car's database throws (nothing changed, the caller's startup-failure path applies)
+  // unless ALLOW_VEHICLE_SOURCE_RESET is set. Dialog turns from before the current source began stay out of the prompt.
   let historySince = Number.MIN_SAFE_INTEGER;
   if (!injected) {
-    const claim = claimVehicleSource(db, config.vehicleSource, clock.now());
+    const claim = claimVehicleSource(db, config.vehicleSource, clock.now(), { allowCarDataReset: config.allowVehicleSourceReset });
     historySince = claim.since;
     if (claim.reset) {
       logger.warn(
         { from: claim.previous, to: claim.source },
-        'vehicle source changed: active alerts cleared, stored telemetry deleted, earlier dialog kept out of the prompt',
+        claim.previous === 'mock'
+          ? 'vehicle source changed: demo alert events and telemetry deleted, earlier dialog kept out of the prompt'
+          : 'vehicle source changed (ALLOW_VEHICLE_SOURCE_RESET): the car\'s active alerts cleared, its telemetry deleted, '
+            + 'earlier dialog kept out of the prompt',
       );
     }
   }

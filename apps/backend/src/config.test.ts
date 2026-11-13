@@ -26,6 +26,7 @@ describe('loadConfig', () => {
       rateLimitPerMinute: 10,
       historyTurns: 4,
       vehicleSource: 'mock',
+      allowVehicleSourceReset: false,
       mockScenario: 'steady-cruise',
       vehicleLabel: null,
       telemetrySampleIntervalMs: 60000,
@@ -73,6 +74,17 @@ describe('loadConfig', () => {
   test('the car source is accepted since the car link exists (Plan 2 Task 7); anything else is refused', () => {
     expect(loadConfig({ VEHICLE_SOURCE: 'car' }).vehicleSource).toBe('car');
     expect(() => loadConfig({ VEHICLE_SOURCE: 'bus' })).toThrow(/VEHICLE_SOURCE/);
+  });
+
+  test('ALLOW_VEHICLE_SOURCE_RESET is off by default, accepts 1/true (and 0/false) and refuses anything else', () => {
+    expect(loadConfig({}).allowVehicleSourceReset).toBe(false);
+    expect(loadConfig({ ALLOW_VEHICLE_SOURCE_RESET: '' }).allowVehicleSourceReset).toBe(false);
+    expect(loadConfig({ ALLOW_VEHICLE_SOURCE_RESET: '1' }).allowVehicleSourceReset).toBe(true);
+    expect(loadConfig({ ALLOW_VEHICLE_SOURCE_RESET: 'true' }).allowVehicleSourceReset).toBe(true);
+    expect(loadConfig({ ALLOW_VEHICLE_SOURCE_RESET: 'TRUE' }).allowVehicleSourceReset).toBe(true);
+    expect(loadConfig({ ALLOW_VEHICLE_SOURCE_RESET: '0' }).allowVehicleSourceReset).toBe(false);
+    expect(loadConfig({ ALLOW_VEHICLE_SOURCE_RESET: 'false' }).allowVehicleSourceReset).toBe(false);
+    expect(() => loadConfig({ ALLOW_VEHICLE_SOURCE_RESET: 'yes' })).toThrow(/ALLOW_VEHICLE_SOURCE_RESET/);
   });
 });
 

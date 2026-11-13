@@ -589,7 +589,8 @@ describe('process lifecycle', () => {
 
     db = openDatabase(databasePath);
     try {
-      expect(new AlertStore(db).active()).toEqual([]);
+      // The demo's alert events are removed, not cleared: the car's history never lists them.
+      expect(db.prepare('SELECT COUNT(*) AS n FROM alert_events').get()?.n).toBe(0);
       expect(new TelemetryStore(db).dailySummaries(30)).toEqual([]);
       expect(db.prepare('SELECT source, since FROM vehicle_source').all()).toEqual([{ source: 'car', since: later }]);
       const dialog = new DialogStore(db);
@@ -622,8 +623,55 @@ describe('process lifecycle', () => {
     await handle.close();
     const db = openDatabase(databasePath);
     try {
-      expect(new AlertStore(db).active()).toEqual([]);
+      expect(db.prepare('SELECT COUNT(*) AS n FROM alert_events').get()?.n).toBe(0);
       expect(db.prepare('SELECT source FROM vehicle_source').all()).toEqual([{ source: 'car' }]);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("a demo start on the car's database is refused unless ALLOW_VEHICLE_SOURCE_RESET is set, and then warns once", async () => {
+    dir = mkdtempSync(join(tmpdir(), 'copilot-backend-'));
+    const databasePath = join(dir, 'copilot.sqlite');
+    const lines: string[] = [];
+    const logDestination = new Writable({ write(chunk, _encoding, done) { lines.push(String(chunk)); done(); } });
+    const warnings = (): string[] => lines.map((line) => JSON.parse(line) as { level: number; msg: string })
+      .filter((line) => line.level === 40).map((line) => line.msg);
+    const env = { DATABASE_PATH: databasePath, PORT: '0', LOG_LEVEL: 'warn' };
+
+    const car = await start({ ...env, VEHICLE_SOURCE: 'car' }, { clock: { now: () => START }, logDestination });
+    await car.close();
+    let db = openDatabase(databasePath);
+    new AlertStore(db).upsert({
+      id: 'cc:39:1', ruleId: 'check-control', dedupKey: 'cc:39', provenance: 'bmw-check-control', severity: 'critical',
+      title: 'car alert', detail: null, at: START, active: true, clearedAt: null,
+    });
+    new TelemetryStore(db).addSample({ at: START, values: { odometer: 48210 } });
+    const dump = (): unknown => ['alert_events', 'telemetry_samples', 'vehicle_source']
+      .map((table) => db.prepare(`SELECT * FROM ${table}`).all());
+    const before = dump();
+    db.close();
+
+    // VEHICLE_SOURCE forgotten: the start fails (main's startup-failure path logs it once and exits 1).
+    await expect(start(env, { clock: { now: () => START + SECOND }, timers: NO_TIMERS, logDestination }))
+      .rejects.toThrow(/DATABASE_PATH[\s\S]*ALLOW_VEHICLE_SOURCE_RESET=1/);
+    db = openDatabase(databasePath);
+    expect(dump()).toEqual(before);
+    db.close();
+    expect(warnings()).toEqual([]);
+
+    const later = START + 60 * SECOND;
+    const demo = await start(
+      { ...env, ALLOW_VEHICLE_SOURCE_RESET: '1' }, { clock: { now: () => later }, timers: NO_TIMERS, logDestination },
+    );
+    await demo.close();
+    expect(warnings()).toEqual([expect.stringContaining('vehicle source changed')]);
+    db = openDatabase(databasePath);
+    try {
+      // The car's alert stays in its history, cleared at the switch; its telemetry is gone.
+      expect(new AlertStore(db).get('cc:39:1')).toMatchObject({ active: false, clearedAt: later });
+      expect(db.prepare('SELECT COUNT(*) AS n FROM telemetry_samples').get()?.n).toBe(0);
+      expect(db.prepare('SELECT source, since FROM vehicle_source').all()).toEqual([{ source: 'mock', since: later }]);
     } finally {
       db.close();
     }

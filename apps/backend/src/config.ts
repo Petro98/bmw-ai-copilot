@@ -22,6 +22,7 @@ export interface Config {
   rateLimitPerMinute: number;         // RATE_LIMIT_PER_MINUTE=10
   historyTurns: number;               // HISTORY_TURNS=4
   vehicleSource: 'mock' | 'car';      // VEHICLE_SOURCE=mock (car: the head unit reports through /car/v1)
+  allowVehicleSourceReset: boolean;   // ALLOW_VEHICLE_SOURCE_RESET=false (1/true: a demo start may reset the car's data)
   mockScenario: ScenarioId;           // MOCK_SCENARIO=steady-cruise
   vehicleLabel: string | null;        // VEHICLE_LABEL= (no VIN, no personal data)
   telemetrySampleIntervalMs: number;  // TELEMETRY_SAMPLE_INTERVAL_MS=60000
@@ -104,6 +105,15 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     return value as T;
   };
 
+  const flag = (name: string, fallback: boolean): boolean => {
+    const value = raw(name)?.toLowerCase() ?? null;
+    if (value === null) return fallback;
+    if (value === '1' || value === 'true') return true;
+    if (value === '0' || value === 'false') return false;
+    problems.push(`${name}: must be 1, true, 0 or false`);
+    return fallback;
+  };
+
   const apiKey = raw('ANTHROPIC_API_KEY');
   if (apiKey !== null && /\s/.test(apiKey)) problems.push('ANTHROPIC_API_KEY: must not contain spaces');
   const mode = oneOf('CLAUDE_MODE', 'auto', ['auto', 'live', 'mock'] as const);
@@ -112,6 +122,8 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
   const claudeModel = text('CLAUDE_MODEL', 'claude-opus-5-5');
 
   const vehicleSource = oneOf('VEHICLE_SOURCE', 'mock', ['mock', 'car'] as const);
+  // Off by default: a demo start on a database the car wrote is refused at startup (db/vehicle-source.ts).
+  const allowVehicleSourceReset = flag('ALLOW_VEHICLE_SOURCE_RESET', false);
 
   // Secrets: the messages name the variable and the rule, never the value.
   const secret = (name: string, minChars: number): string | null => {
@@ -163,6 +175,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     rateLimitPerMinute: integer('RATE_LIMIT_PER_MINUTE', 10, 1, 1000),
     historyTurns: integer('HISTORY_TURNS', 4, 0, 50),
     vehicleSource,
+    allowVehicleSourceReset,
     mockScenario: oneOf('MOCK_SCENARIO', 'steady-cruise', SCENARIOS.map((s) => s.id)),
     vehicleLabel,
     telemetrySampleIntervalMs: integer('TELEMETRY_SAMPLE_INTERVAL_MS', 60_000, 1000, 86_400_000),
