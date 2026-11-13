@@ -48,3 +48,30 @@ jobs:
         run: test "$(node --version)" = "v8.16.2"
       - name: Smoke test on Node 8.16.2
         run: node scripts/node8-smoke.js
+
+  car:
+    # The head-unit app: bundles built and unit-tested on Node 22, then the app bundle is syntax-checked
+    # and the uplink smoke test runs on the real Node 8.16.2 runtime (x86_64 Linux).
+    name: car (build, tests, Node 8.16.2 checks)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run build:car
+      - run: npm test -w car
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 8.16.2
+      - name: Check the runtime is Node 8.16.2
+        run: test "$(node --version)" = "v8.16.2"
+      - name: Syntax check of the app bundle on Node 8.16.2
+        run: node --check car/apps/p98_copilot/main.js
+      - name: Uplink smoke test on Node 8.16.2
+        run: node car/test/node8-uplink-smoke.js

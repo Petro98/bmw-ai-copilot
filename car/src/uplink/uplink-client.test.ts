@@ -10,14 +10,14 @@ const MINUTE = 60_000;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- request bodies are inspected loosely in the assertions
 type Body = any;
-interface Call { method: string; path: string; body: Body; bearer: string; options?: { timeoutMs?: number } }
+interface Call { method: string; path: string; body: Body; bearer: string; options?: { timeoutMs?: number; longPoll?: boolean } }
 
 /** A stand-in for HttpsClient: records every request and answers with `reply`. */
 function fakeHttp(reply: (call: Call) => Promise<unknown> = () => Promise.resolve(undefined)) {
-  const state = { online: true, closes: 0, calls: [] as Call[], reply };
+  const state = { online: true, closes: 0, reopens: 0, calls: [] as Call[], reply };
   const http = {
     online: () => state.online,
-    request(method: string, path: string, body: unknown, bearer: string, options?: { timeoutMs?: number }) {
+    request(method: string, path: string, body: unknown, bearer: string, options?: { timeoutMs?: number; longPoll?: boolean }) {
       const call = { method, path, body: body === null ? null : JSON.parse(JSON.stringify(body)), bearer, options };
       state.calls.push(call);
       if (!state.online) return Promise.reject(new UplinkError('offline', 'no lease'));
@@ -25,6 +25,9 @@ function fakeHttp(reply: (call: Call) => Promise<unknown> = () => Promise.resolv
     },
     close() {
       state.closes++;
+    },
+    reopen() {
+      state.reopens++;
     },
   };
   return { http: http as unknown as HttpsClient, state };
@@ -343,6 +346,8 @@ test('ask, config and dialog use the car API and check the reply shape', async (
   // the dialog poll may wait 25 s on the server, so its own timeout is longer than that
   const poll = state.calls.find((c) => c.path.indexOf('/car/v1/dialog') === 0)!;
   expect(poll.options!.timeoutMs!).toBeGreaterThan(25_000);
+  // and it goes on its own connection, so it does not hold up anything else
+  for (const c of state.calls) expect(c.options?.longPoll === true).toBe(c.path.indexOf('/car/v1/dialog') === 0);
   // the backend may spend up to CLAUDE_TIMEOUT_MS = 60 s on one answer, so the ask waits longer than that
   const ask = state.calls.find((c) => c.path === '/car/v1/ask')!;
   expect(ask.options!.timeoutMs!).toBe(ASK_TIMEOUT_MS);
@@ -386,15 +391,82 @@ test('a non-UplinkError failure is treated as a server error and never escapes s
   await settle();
 });
 
-test('close() closes the connection and the client can be used again after', async () => {
+test('close() closes the connection; nothing is attempted until reopen()', async () => {
   const { uplink, state, clock } = setup();
   uplink.close();
   expect(state.closes).toBe(1);
   uplink.recordSnapshot(snap(1));
+  uplink.sendAlerts([alert(1)]);
   clock.t += MINUTE;
+  uplink.onTick('driving');
+  await expect(uplink.ask('Стан авто', 'full')).rejects.toMatchObject({ kind: 'offline' });
+  await expect(uplink.fetchConfig()).rejects.toMatchObject({ kind: 'offline' });
+  await expect(uplink.pollDialog(null)).rejects.toMatchObject({ kind: 'offline' });
+  await settle();
+  expect(state.calls).toHaveLength(0);
+  expect(uplink.queued()).toEqual({ snapshots: 1, alerts: 1 });
+
+  uplink.reopen();
+  expect(state.reopens).toBe(1);
+  uplink.onTick('driving');
+  await settle();
+  expect(state.calls.map((c) => c.path)).toEqual(['/car/v1/snapshots', '/car/v1/alerts']);
+});
+
+test('retry() after unauthorized lets the next request through, and sends nothing by itself', async () => {
+  const { uplink, state, clock } = setup({ reply: fail('unauthorized') });
+  uplink.recordSnapshot(snap(1));
   uplink.onTick('driving');
   await settle();
   expect(state.calls).toHaveLength(1);
+  expect(uplink.status()).toBe('unpaired');
+
+  // the owner registers the device on the pairing page; the same id and secret are now accepted
+  state.reply = () => Promise.resolve(undefined);
+  uplink.retry();
+  await settle();
+  expect(state.calls).toHaveLength(1);
+  expect(uplink.status()).toBe('unpaired'); // until a request says otherwise
+
+  clock.t += MINUTE;
+  uplink.onTick('driving');
+  await settle();
+  expect(state.calls).toHaveLength(2);
+  expect(state.calls[1]).toMatchObject({ path: '/car/v1/snapshots', bearer: 'device-0001.secret-0001' });
+  expect(uplink.status()).toBe('ok');
+
+  // still not registered: one more 401 blocks again until the next retry()
+  state.reply = fail('unauthorized');
+  await expect(uplink.fetchConfig()).rejects.toMatchObject({ kind: 'unauthorized' });
+  await expect(uplink.fetchConfig()).rejects.toMatchObject({ kind: 'unauthorized' });
+  expect(state.calls).toHaveLength(3);
+  uplink.retry();
+  state.reply = () => Promise.resolve({ ownerLimits: {}, popupsEnabled: true });
+  await expect(uplink.fetchConfig()).resolves.toEqual({ ownerLimits: {}, popupsEnabled: true });
+  expect(state.calls).toHaveLength(4);
+  expect(uplink.status()).toBe('ok');
+});
+
+test('retry() lifts the block left by a client error to a background send', async () => {
+  const { uplink, state, clock } = setup({ reply: fail('client-error') });
+  uplink.sendAlerts([alert(1)]);
+  await settle();
+  expect(state.calls).toHaveLength(1);
+  uplink.sendAlerts([alert(2)]);
+  await settle();
+  expect(state.calls).toHaveLength(1);
+  expect(uplink.status()).toBe('error');
+
+  state.reply = () => Promise.resolve(undefined);
+  uplink.retry();
+  expect(state.calls).toHaveLength(1);
+  clock.t += MINUTE;
+  uplink.onTick('awake');
+  await settle();
+  expect(state.calls).toHaveLength(2);
+  expect(state.calls[1].body.alerts.map((a: AlertEvent) => a.id)).toEqual(['a1', 'a2']);
+  expect(uplink.status()).toBe('ok');
+  expect(() => uplink.retry()).not.toThrow(); // nothing blocked: no effect
 });
 
 test('no timer is created by the client', async () => {
@@ -414,7 +486,9 @@ test('no timer is created by the client', async () => {
   await uplink.fetchConfig().catch(() => undefined);
   await uplink.pollDialog(null).catch(() => undefined);
   uplink.status();
+  uplink.retry();
   uplink.close();
+  uplink.reopen();
   await settle();
   for (const spy of timers) expect(spy).not.toHaveBeenCalled();
 });

@@ -6,7 +6,8 @@
  * createLeaseLookup() returns a function with the shape of Node's `dns.lookup`, given to
  * `https.request` as its `lookup` option (Node 8.16: net.Socket#connect honours `options.lookup`).
  * It uses `dns.Resolver` (Node >= 8.3) with the lease's servers, caches answers for five minutes, keeps
- * at most 32 names, and gives up on a lookup after 10 s.
+ * at most 32 names, and gives up on a lookup after 10 s. Its `cancelPending()` ends every lookup still
+ * waiting for an answer (timer cleared, outstanding queries cancelled), for HttpsClient.close().
  */
 import type { Clock } from '@copilot/vehicle-core';
 import { isIpAddress, type Lease } from './lease';
@@ -21,6 +22,8 @@ export interface DnsResolverLike {
   setServers(servers: string[]): void;
   resolve4(hostname: string, callback: ResolveCallback): void;
   resolve6(hostname: string, callback: ResolveCallback): void;
+  /** Cancels the outstanding queries (Node >= 8.3); optional so that a minimal stand-in needs none. */
+  cancel?(): void;
 }
 export interface DnsModuleLike { Resolver: new () => DnsResolverLike }
 export interface TimeoutApi { setTimeout(fn: () => void, ms: number): unknown; clearTimeout(handle: unknown): void }
@@ -28,6 +31,11 @@ export interface TimeoutApi { setTimeout(fn: () => void, ms: number): unknown; c
 export interface LookupAddress { address: string; family: number }
 export type LookupCallback = (err: Error | null, address?: string | LookupAddress[], family?: number) => void;
 export type LookupFn = (hostname: string, options: unknown, callback: LookupCallback) => void;
+/** A lookup whose pending queries can be ended at once. */
+export interface LeaseLookup extends LookupFn {
+  /** Ends every lookup still waiting with an error (delivered as a promise job): no timer is left running. */
+  cancelPending(): void;
+}
 
 /** Marks an error as a failure of our resolver, so that the client reports `dns` for it. */
 const DNS_FAILURE_MARK = 'uplinkDnsFailure';
@@ -40,8 +48,10 @@ interface CacheEntry { address: string; family: number; at: number }
 
 export interface LeaseLookupOptions { dns: DnsModuleLike; lease: () => Lease; clock: Clock; timers: TimeoutApi }
 
-export function createLeaseLookup(options: LeaseLookupOptions): LookupFn {
+export function createLeaseLookup(options: LeaseLookupOptions): LeaseLookup {
   const { dns, lease, clock, timers } = options;
+  /** The lookups waiting for an answer; each leaves within 10 s (its timer), so the list stays bounded. */
+  const pending: Array<() => void> = [];
   let resolver: DnsResolverLike | null = null;
   let serversKey = '';
   let cache: Record<string, CacheEntry> = Object.create(null);
@@ -80,7 +90,7 @@ export function createLeaseLookup(options: LeaseLookupOptions): LookupFn {
     return resolver;
   };
 
-  return function leaseLookup(hostname: string, lookupOptions: unknown, callback: LookupCallback): void {
+  const leaseLookup = function leaseLookup(hostname: string, lookupOptions: unknown, callback: LookupCallback): void {
     if (typeof lookupOptions === 'function') {
       callback = lookupOptions as LookupCallback;
       lookupOptions = {};
@@ -96,6 +106,8 @@ export function createLeaseLookup(options: LeaseLookupOptions): LookupFn {
       done = true;
       if (timer !== null) timers.clearTimeout(timer);
       timer = null;
+      const at = pending.indexOf(cancel);
+      if (at >= 0) pending.splice(at, 1);
       if (err) callback(err);
       else if (all) callback(null, [{ address: address as string, family: family as number }]);
       else callback(null, address, family);
@@ -112,6 +124,13 @@ export function createLeaseLookup(options: LeaseLookupOptions): LookupFn {
     const later = (fn: () => void): void => {
       Promise.resolve().then(fn).then(undefined, () => undefined);
     };
+    /** Ends this lookup: its timer is cleared now, the error is delivered as a promise job. */
+    function cancel(): void {
+      if (done) return;
+      if (timer !== null) timers.clearTimeout(timer);
+      timer = null;
+      later(() => fail('the uplink was closed', 'ECANCELLED'));
+    }
 
     try {
       const name = String(hostname).toLowerCase();
@@ -147,6 +166,7 @@ export function createLeaseLookup(options: LeaseLookupOptions): LookupFn {
         timer = null;
         fail('no answer within ' + DNS_LOOKUP_TIMEOUT_MS + ' ms', 'ETIMEOUT');
       }, DNS_LOOKUP_TIMEOUT_MS);
+      pending.push(cancel);
 
       const answered = (family: number, fallback: (() => void) | null) => (err: Error | null, addresses?: string[]): void => {
         if (done) return;
@@ -173,5 +193,18 @@ export function createLeaseLookup(options: LeaseLookupOptions): LookupFn {
     } catch (error) {
       fail(error instanceof Error ? error.message : 'resolver error', 'ENOTFOUND');
     }
+  } as LeaseLookup;
+
+  leaseLookup.cancelPending = (): void => {
+    const waiting = pending.splice(0, pending.length);
+    for (const cancel of waiting) cancel();
+    if (waiting.length > 0 && resolver !== null && typeof resolver.cancel === 'function') {
+      try {
+        resolver.cancel();
+      } catch {
+        // nothing outstanding
+      }
+    }
   };
+  return leaseLookup;
 }

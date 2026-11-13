@@ -3,6 +3,11 @@
  * it acts only from onTick() and from explicit calls, so a sleeping power gate means a silent uplink.
  * Everything it keeps is bounded (240 snapshots, 20 alerts) and nothing is retried inside a request:
  * a failed batch goes back to the front of its buffer and waits for the next interval.
+ *
+ * A 401/403 (and a 4xx to a background send) blocks the device's bearer. The block ends when the device
+ * changes or when the wiring calls retry(): the car makes up its own id and secret before the owner has
+ * registered them on the pairing page, so its first requests are refused, and registering changes
+ * nothing the client could see.
  */
 import type { Clock, VehicleSnapshot } from '@copilot/vehicle-core';
 import type { AlertEvent } from '@copilot/event-engine';
@@ -18,7 +23,7 @@ import {
 } from '@copilot/shared';
 import type { PowerState } from '../power/power-gate';
 import type { Log } from '../safe';
-import { UplinkError, type HttpsClient, type UplinkErrorKind } from './https-client';
+import { UplinkError, type HttpsClient, type RequestOptions, type UplinkErrorKind } from './https-client';
 import { RingBuffer } from './ring-buffer';
 
 export type LinkStatus = 'unpaired' | 'offline' | 'clock' | 'error' | 'ok';
@@ -57,9 +62,11 @@ export class UplinkClient {
   private lastAlertAttemptAt: number | null = null;
   private batchInFlight = false;
   private alertsInFlight = false;
-  /** Set by 401/403 or another 4xx: nothing is sent with this bearer until the device changes. */
+  /** Set by 401/403 or another 4xx: nothing is sent with this bearer until the device changes or retry(). */
   private blocked: { kind: 'unauthorized' | 'client-error'; bearer: string } | null = null;
   private lastOutcome: Outcome | null = null;
+  /** Between close() and reopen(): nothing is sent and every explicit request is refused as offline. */
+  private closed = false;
 
   constructor(o: UplinkClientOptions) {
     this.http = o.http;
@@ -84,7 +91,7 @@ export class UplinkClient {
    */
   onTick(power: PowerState): void {
     try {
-      if (power === 'asleep') return;
+      if (power === 'asleep' || this.closed) return;
       const bearer = this.bearer();
       if (bearer === null || !this.http.online()) return;
       const now = this.clock.now();
@@ -103,7 +110,7 @@ export class UplinkClient {
   sendAlerts(events: AlertEvent[]): void {
     try {
       for (const event of events) this.alerts.push(event);
-      if (this.alerts.size() === 0 || this.alertsInFlight) return;
+      if (this.alerts.size() === 0 || this.alertsInFlight || this.closed) return;
       const bearer = this.bearer();
       if (bearer === null || !this.http.online()) return;
       this.flushAlerts(bearer, this.clock.now());
@@ -128,7 +135,8 @@ export class UplinkClient {
   /** One GET /car/v1/dialog (the server waits up to 25 s for a newer turn); the caller decides when to call again. */
   pollDialog(afterTurnId: string | null): Promise<DialogTurn[]> {
     const query = afterTurnId === null ? '' : '?after=' + encodeURIComponent(afterTurnId);
-    return this.call<DialogTurn[]>('GET', CAR_API_PREFIX + '/dialog' + query, null, { timeoutMs: DIALOG_POLL_TIMEOUT_MS }, (reply) =>
+    // on its own connection (HttpsClient), so a held poll does not delay alerts, snapshots or a question
+    return this.call<DialogTurn[]>('GET', CAR_API_PREFIX + '/dialog' + query, null, { timeoutMs: DIALOG_POLL_TIMEOUT_MS, longPoll: true }, (reply) =>
       isObject(reply) && Array.isArray(reply.turns) ? (reply.turns as DialogTurn[]) : null,
     );
   }
@@ -153,6 +161,8 @@ export class UplinkClient {
         return 'offline';
       case 'clock':
         return 'clock';
+      case 'unauthorized':
+        return 'unpaired'; // lifted by retry(), not yet answered otherwise
       default:
         return 'error';
     }
@@ -163,10 +173,30 @@ export class UplinkClient {
     return { snapshots: this.snapshots.size(), alerts: this.alerts.size() };
   }
 
-  /** Closes the connection. The client stays usable: the next request opens a new one. */
+  /**
+   * Lifts an `unauthorized` block, and a `client-error` block left by a background send, so that the
+   * next request is attempted with the same device. Sends nothing by itself and starts no timer: the
+   * wiring calls it on waking from asleep and, while the pairing screen is visible, at most every 30 s.
+   */
+  retry(): void {
+    this.blocked = null;
+  }
+
+  /** Closes the connection; nothing is sent until reopen() (what is waiting stays queued). */
   close(): void {
+    this.closed = true;
     try {
       this.http.close();
+    } catch (error) {
+      this.note(error);
+    }
+  }
+
+  /** Opens the client again after close(); the next request opens a new connection. */
+  reopen(): void {
+    this.closed = false;
+    try {
+      this.http.reopen();
     } catch (error) {
       this.note(error);
     }
@@ -243,7 +273,8 @@ export class UplinkClient {
   }
 
   /** An explicit request: refused at once when unpaired or blocked; the reply's shape is checked. */
-  private call<T>(method: 'GET' | 'POST', path: string, body: unknown, options: { timeoutMs?: number } | undefined, shape: (reply: unknown) => T | null): Promise<T> {
+  private call<T>(method: 'GET' | 'POST', path: string, body: unknown, options: RequestOptions | undefined, shape: (reply: unknown) => T | null): Promise<T> {
+    if (this.closed) return Promise.reject(new UplinkError('offline', 'the uplink is closed'));
     let bearer: string | null;
     let paired = false;
     try {
@@ -287,7 +318,7 @@ export class UplinkClient {
     const blocks = uplinkError.kind === 'unauthorized' || (background && uplinkError.kind === 'client-error');
     if (blocks && (this.blocked === null || this.blocked.bearer !== bearer)) {
       this.blocked = { kind: uplinkError.kind, bearer };
-      this.note('the backend refused a request (' + uplinkError.kind + '); nothing more is sent until the device or its address changes');
+      this.note('the backend refused a request (' + uplinkError.kind + '); nothing more is sent until the device changes or retry()');
     }
     return uplinkError;
   }

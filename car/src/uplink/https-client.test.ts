@@ -1,12 +1,18 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- the fakes stand in for Node's loosely typed request, response and callback APIs */
 import { EventEmitter } from 'node:events';
+import * as http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { afterEach, expect, test, vi } from 'vitest';
+import type { AlertEvent } from '@copilot/event-engine';
 import type { Log } from '../safe';
 import { HttpsClient, MAX_RESPONSE_BYTES, UplinkError, type HttpsClientOptions, type HttpsModuleLike } from './https-client';
 import type { Lease } from './lease';
-import { DNS_CACHE_MAX, DNS_CACHE_MS, DNS_LOOKUP_TIMEOUT_MS, createLeaseLookup, type DnsModuleLike, type LookupFn } from './resolver';
+import { DNS_CACHE_MAX, DNS_CACHE_MS, DNS_LOOKUP_TIMEOUT_MS, createLeaseLookup, type DnsModuleLike, type LookupFn, type TimeoutApi } from './resolver';
+import { UplinkClient } from './uplink-client';
 
-// No test here opens a socket: the https and dns modules are fakes.
+// Most tests use fake https and dns modules. The close() and long-poll tests run Node's real http
+// module and Agent against a server on 127.0.0.1 (nothing leaves the machine; names resolve through
+// the fake dns module), because the bugs they guard against live in the Agent's queueing.
 
 const quietLog: Log = { info() {}, warn() {}, error() {} };
 const ONLINE: Lease = { online: true, dns: ['192.0.2.53'] };
@@ -229,72 +235,218 @@ test('the default timeout is 15 s and a request may ask for a longer one', async
   expect(longKind).toBe('timeout');
 });
 
-test('close() destroys the agent; the next request gets a fresh one', async () => {
+test('close() destroys the agent and closes the client until reopen(); then a fresh agent is used', async () => {
   const https = fakeHttps((x) => x.respond(204));
-  const c = client(https);
+  const timers = trackedTimers();
+  const c = client(https, { timers: timers.api });
   await c.request('POST', '/a', {}, 'd.s');
   c.close();
   expect(https.agents[0].destroyed).toBe(true);
+  // closed for good: refused at once, no request, no agent, no timer
+  expect(await kindOf(c.request('POST', '/a', {}, 'd.s'))).toBe('offline');
+  expect(https.exchanges).toHaveLength(1);
+  expect(https.agents).toHaveLength(1);
+  expect(timers.pending()).toBe(0);
+  c.close();
+  c.reopen();
   await c.request('POST', '/a', {}, 'd.s');
   expect(https.agents).toHaveLength(2);
   expect(https.agents[1].destroyed).toBe(false);
+  c.reopen(); // reopening an open client changes nothing
+  await c.request('POST', '/b', {}, 'd.s');
+  expect(https.agents).toHaveLength(2);
   c.close();
   c.close();
+  expect(https.agents[1].destroyed).toBe(true);
 });
 
-/**
- * Models Node's Agent with `maxSockets: 1`: a second request waits in the agent's queue, and when the
- * agent's socket is destroyed the agent opens a new socket for the next queued request (Node 8 and 22
- * `Agent.removeSocket`); a request that was aborted while waiting is dropped instead of being sent.
- */
-function fakeQueuingHttps() {
-  const wire: string[] = [];
-  let destroyed = false;
-  let active: FakeRequest | null = null;
-  const queue: Array<{ req: FakeRequest; line: string }> = [];
-  const module: HttpsModuleLike = {
-    Agent: class {
-      destroy(): void {
-        destroyed = true;
-        const held = active;
-        active = null;
-        if (held !== null && !held.aborted) held.emit('error', Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }));
-        const next = queue.shift();
-        if (next !== undefined && !next.req.aborted) {
-          active = next.req;
-          wire.push(next.line + ' after close');
-        }
-      }
-    } as unknown as HttpsModuleLike['Agent'],
-    request(options: Record<string, any>) {
-      const req = new FakeRequest();
-      const line = options.method + ' ' + options.path;
-      if (active === null) {
-        active = req;
-        wire.push(line);
-      } else {
-        queue.push({ req, line });
-      }
-      return req as any;
+test('after close() the lookup given to the sockets answers with an error at once: no DNS query, no timer', async () => {
+  const dns = fakeDns();
+  const timers = trackedTimers();
+  const https = fakeHttps((x) => x.respond(204));
+  const c = client(https, { dns: dns.module, timers: timers.api });
+  await c.request('POST', '/a', {}, 'd.s');
+  const lookup = https.exchanges[0].options.lookup as LookupFn;
+  c.close();
+  const answer = await lookupOnce(lookup, 'api.example.invalid');
+  expect(answer.err).toBeInstanceOf(Error);
+  expect(dns.calls).toHaveLength(0);
+  expect(timers.pending()).toBe(0);
+  // a lookup handed out before a reopen stays dead after it
+  c.reopen();
+  expect((await lookupOnce(lookup, 'api.example.invalid')).err).toBeInstanceOf(Error);
+  expect(dns.calls).toHaveLength(0);
+});
+
+test('close() clears a resolver timer that is already running and ends that lookup with an error', async () => {
+  const dns = fakeDns(() => ({ hang: true }));
+  const timers = trackedTimers();
+  const lookupErrors: unknown[] = [];
+  const https = fakeHttps((x) => (x.options.lookup as LookupFn)(x.options.hostname, {}, (err) => lookupErrors.push(err)));
+  const c = client(https, { dns: dns.module, timers: timers.api });
+  const pending = kindOf(c.request('POST', '/a', {}, 'd.s'));
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(dns.calls).toHaveLength(1);
+  expect(timers.pending()).toBe(2); // the request's timeout and the resolver's 10 s timer
+  c.close();
+  expect(timers.pending()).toBe(0);
+  expect(await pending).toBe('offline');
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(lookupErrors).toHaveLength(1);
+  expect(lookupErrors[0]).toBeInstanceOf(Error);
+  expect(dns.resolvers[0].cancelled).toBe(1);
+});
+
+test('the dialog long-poll gets its own single-socket agent, created on first use and destroyed by close()', async () => {
+  const https = fakeHttps((x) => x.respond(204));
+  const c = client(https);
+  await c.request('POST', '/car/v1/alerts', {}, 'd.s');
+  expect(https.agents).toHaveLength(1);
+  await c.request('GET', '/car/v1/dialog', null, 'd.s', { timeoutMs: 35_000, longPoll: true });
+  await c.request('GET', '/car/v1/dialog', null, 'd.s', { timeoutMs: 35_000, longPoll: true });
+  await c.request('POST', '/car/v1/ask', {}, 'd.s');
+  expect(https.agents).toHaveLength(2);
+  expect(https.agents[1].options).toMatchObject({ keepAlive: true, maxSockets: 1 });
+  expect(https.exchanges.map((x) => https.agents.indexOf(x.options.agent))).toEqual([0, 1, 1, 0]);
+  c.close();
+  expect(https.agents.map((a) => a.destroyed)).toEqual([true, true]);
+});
+
+// ---- Node's real Agent against a local server ---------------------------------------------------
+
+/** A timer API that knows how many of its timers are still pending. */
+function trackedTimers(): { api: TimeoutApi; pending(): number } {
+  const live: unknown[] = [];
+  const api: TimeoutApi = {
+    setTimeout(fn, ms) {
+      const handle: ReturnType<typeof setTimeout> = setTimeout(() => {
+        const at = live.indexOf(handle);
+        if (at >= 0) live.splice(at, 1);
+        fn();
+      }, ms);
+      live.push(handle);
+      return handle;
+    },
+    clearTimeout(handle) {
+      const at = live.indexOf(handle);
+      if (at >= 0) live.splice(at, 1);
+      clearTimeout(handle as ReturnType<typeof setTimeout>);
     },
   };
-  return { module, wire, destroyed: () => destroyed };
+  return { api, pending: () => live.length };
 }
 
-test('close() settles and aborts a held and a queued request, so nothing is sent afterwards and no timer remains', async () => {
-  vi.useFakeTimers();
-  const https = fakeQueuingHttps();
-  const c = client(https.module);
-  const held = kindOf(c.request('GET', '/car/v1/dialog', null, 'd.s', { timeoutMs: 35_000 }));
+interface Arrival { method: string; url: string; res: http.ServerResponse }
+const servers: http.Server[] = [];
+
+/** A plain-HTTP server on 127.0.0.1; `answer` replies to a request or returns false to hold it open. */
+async function loopback(answer: (a: Arrival) => boolean = () => false): Promise<{ port: number; arrivals: Arrival[]; connections: () => number }> {
+  const arrivals: Arrival[] = [];
+  let connections = 0;
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      const arrival = { method: req.method || '', url: req.url || '', res };
+      arrivals.push(arrival);
+      answer(arrival);
+    });
+  });
+  server.on('connection', () => connections++);
+  servers.push(server);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  return { port: (server.address() as AddressInfo).port, arrivals, connections: () => connections };
+}
+
+afterEach(async () => {
+  for (const server of servers.splice(0)) {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+async function waitFor(condition: () => boolean, what: string): Promise<void> {
+  for (let i = 0; i < 200 && !condition(); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  if (!condition()) throw new Error('timed out waiting for ' + what);
+}
+
+/** Gives the sockets time to close and the Agent time to act on its queue. */
+async function letSocketsSettle(): Promise<void> {
+  for (let i = 0; i < 10; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+}
+
+function realClient(port: number, extra: Partial<HttpsClientOptions>): HttpsClient {
+  return new HttpsClient({
+    baseUrl: 'http://copilot.example.invalid:' + port,
+    plainHttpForTests: true,
+    https: http as unknown as HttpsModuleLike,
+    lease: () => ONLINE,
+    log: quietLog,
+    ...extra,
+  });
+}
+
+test('close() with a request held and one queued behind the single socket: no DNS query and no timer afterwards, even with the DNS cache expired', async () => {
+  const server = await loopback(); // holds every request
+  const dns = fakeDns(() => ({ addresses: ['127.0.0.1'] }));
+  const timers = trackedTimers();
+  const now = { t: 1_000_000 };
+  const c = realClient(server.port, { dns: dns.module, timers: timers.api, clock: { now: () => now.t } });
+  const held = kindOf(c.request('GET', '/car/v1/config', null, 'd.s'));
+  await waitFor(() => server.arrivals.length === 1, 'the first request');
   const queued = kindOf(c.request('POST', '/car/v1/alerts', { alerts: [] }, 'd.s'));
-  expect(https.wire).toEqual(['GET /copilot/car/v1/dialog']);
-  expect(vi.getTimerCount()).toBe(2);
+  await letSocketsSettle();
+  expect(server.arrivals).toHaveLength(1); // the second one waits in the Agent's queue
+  expect(dns.calls).toHaveLength(1);
+  now.t += DNS_CACHE_MS + 1;
+
   c.close();
-  expect(https.destroyed()).toBe(true);
+  expect(timers.pending()).toBe(0);
   expect(await held).toBe('offline');
   expect(await queued).toBe('offline');
-  expect(https.wire).toEqual(['GET /copilot/car/v1/dialog']);
-  expect(vi.getTimerCount()).toBe(0);
+  await letSocketsSettle();
+  expect(dns.calls).toHaveLength(1);
+  expect(timers.pending()).toBe(0);
+  expect(server.arrivals).toHaveLength(1);
+});
+
+test('with a dialog poll held open, an alert POST and a question go out at once on the other socket', async () => {
+  const turn = { id: 't1', at: 1, question: 'Стан авто', answer: 'Усе гаразд.', style: 'full', source: 'car', model: 'm', snapshotAt: null };
+  const server = await loopback((a) => {
+    if (a.url.indexOf('/car/v1/dialog') === 0) return false;
+    if (a.url === '/car/v1/ask') {
+      a.res.setHeader('Content-Type', 'application/json');
+      a.res.end(JSON.stringify({ turn }));
+    } else {
+      a.res.statusCode = 204;
+      a.res.end();
+    }
+    return true;
+  });
+  const timers = trackedTimers();
+  const dns = fakeDns(() => ({ addresses: ['127.0.0.1'] }));
+  const http1 = realClient(server.port, { dns: dns.module, timers: timers.api });
+  const uplink = new UplinkClient({ http: http1, device: () => ({ id: 'device-0001', secret: 'secret-0001' }), clock: { now: () => 1_000_000 }, log: quietLog });
+
+  const poll = uplink.pollDialog(null).then(
+    () => 'resolved',
+    (error: UplinkError) => error.kind,
+  );
+  await waitFor(() => server.arrivals.length === 1, 'the dialog poll');
+  const alert: AlertEvent = {
+    id: 'a1', ruleId: 'r', dedupKey: 'k1', provenance: 'owner-configured', severity: 'warning',
+    title: 'Ліміт', detail: null, at: 1, active: true, clearedAt: null,
+  };
+  uplink.sendAlerts([alert]);
+  await expect(uplink.ask('Стан авто', 'full')).resolves.toEqual(turn);
+  await waitFor(() => uplink.queued().alerts === 0 && server.arrivals.length === 3, 'the alert');
+  expect(server.arrivals.map((a) => a.method + ' ' + a.url)).toEqual(['GET /car/v1/dialog', 'POST /car/v1/alerts', 'POST /car/v1/ask']);
+  expect(server.connections()).toBe(2); // the poll's socket and one for everything else
+
+  uplink.close();
+  expect(await poll).toBe('offline');
+  expect(timers.pending()).toBe(0);
 });
 
 test('a plain http:// address is refused unless the test-only plain mode is on; a bad address never throws', async () => {
@@ -312,15 +464,19 @@ test('a plain http:// address is refused unless the test-only plain mode is on; 
 
 function fakeDns(answer: (host: string, family: 4 | 6) => { error?: string; addresses?: string[]; hang?: boolean } = () => ({ addresses: ['203.0.113.7'] })) {
   const calls: Array<{ host: string; family: 4 | 6; servers: string[] }> = [];
-  const resolvers: Array<{ servers: string[] }> = [];
+  const resolvers: Array<{ servers: string[]; cancelled: number }> = [];
   const module: DnsModuleLike = {
     Resolver: class {
       servers: string[] = [];
+      cancelled = 0;
       constructor() {
         resolvers.push(this);
       }
       setServers(servers: string[]): void {
         this.servers = servers.slice();
+      }
+      cancel(): void {
+        this.cancelled++;
       }
       resolve4(host: string, cb: (err: Error | null, addresses?: string[]) => void): void {
         this.answer(host, 4, cb);

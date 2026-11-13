@@ -1,15 +1,19 @@
 /**
  * HTTPS to the backend on the head unit's Node 8.16.2: `https.request` (no fetch, no global URL), one
- * keep-alive agent with a single socket, names resolved through the uplink lease's DNS servers, normal
- * certificate verification (never weakened: a wrong head-unit clock is reported as `clock`), and one
- * timeout per request. No retry happens here: the caller decides when to try again.
+ * keep-alive agent with a single socket, plus a second single-socket agent used only by the dialog
+ * long-poll (so a poll held for 25 s does not hold up snapshots, alerts and questions: at most two
+ * connections), names resolved through the uplink lease's DNS servers, normal certificate verification
+ * (never weakened: a wrong head-unit clock is reported as `clock`), and one timeout per request. No
+ * retry happens here: the caller decides when to try again.
+ *
+ * close() closes the client for good until reopen(): see there.
  */
 import * as nodeDns from 'dns';
 import * as nodeHttps from 'https';
 import type { Clock } from '@copilot/vehicle-core';
 import type { Log } from '../safe';
 import type { Lease } from './lease';
-import { createLeaseLookup, isDnsFailure, type DnsModuleLike, type LookupFn, type TimeoutApi } from './resolver';
+import { createLeaseLookup, isDnsFailure, type DnsModuleLike, type LeaseLookup, type LookupCallback, type LookupFn, type TimeoutApi } from './resolver';
 
 export type UplinkErrorKind = 'offline' | 'dns' | 'timeout' | 'clock' | 'tls' | 'unauthorized' | 'client-error' | 'server-error';
 
@@ -64,7 +68,14 @@ export interface HttpsClientOptions {
   plainHttpForTests?: boolean;
 }
 
-export interface RequestOptions { timeoutMs?: number }
+export interface RequestOptions {
+  timeoutMs?: number;
+  /** The dialog long-poll: sent on its own single-socket agent, created on first use. */
+  longPoll?: boolean;
+}
+
+/** One open period of the client, from construction or reopen() to close(). */
+interface Generation { closed: boolean; lookup: LookupFn }
 
 interface Target { hostname: string; port: number; basePath: string }
 
@@ -141,8 +152,11 @@ export class HttpsClient {
   private readonly ca: string[] | null;
   private readonly target: Target | null;
   private readonly targetProblem: string;
-  private readonly lookup: LookupFn;
+  private readonly resolve: LeaseLookup;
+  private generation: Generation;
   private agent: AgentLike | null = null;
+  /** The dialog long-poll's own agent; created by the first long-poll, destroyed by close(). */
+  private pollAgent: AgentLike | null = null;
   /**
    * Requests not yet settled, so `close()` can end them. Without this, a request waiting in the agent's
    * queue (one socket) would be given a new socket on the orphaned agent once the old one is destroyed,
@@ -167,12 +181,13 @@ export class HttpsClient {
         // logging is best effort
       }
     }
-    this.lookup = createLeaseLookup({
+    this.resolve = createLeaseLookup({
       dns: o.dns || (nodeDns as unknown as DnsModuleLike),
       lease: () => this.currentLease(),
       clock: o.clock || { now: () => Date.now() },
       timers: this.timers,
     });
+    this.generation = this.newGeneration();
   }
 
   /** Whether the uplink has a lease right now. Never throws. */
@@ -200,6 +215,8 @@ export class HttpsClient {
         else resolve(value as T);
       };
 
+      const generation = this.generation;
+      if (generation.closed) return finish(new UplinkError('offline', 'the uplink is closed'));
       const target = this.target;
       if (target === null) return finish(new UplinkError('client-error', this.targetProblem));
       if (!this.online()) return finish(new UplinkError('offline', 'no uplink lease'));
@@ -223,8 +240,8 @@ export class HttpsClient {
         port: target.port,
         path: target.basePath + path,
         headers,
-        agent: this.currentAgent(),
-        lookup: this.lookup,
+        agent: this.currentAgent(options !== undefined && options.longPoll === true),
+        lookup: generation.lookup,
       };
       // On Node 8 `ca` replaces the bundled roots (tls.rootCertificates only exists from Node 12), so a
       // backend reached with extra CAs must chain to one of them. Verification itself stays on.
@@ -257,21 +274,34 @@ export class HttpsClient {
   }
 
   /**
-   * Ends every request still in flight (rejected as `offline`, aborted, its timer cleared) before the
-   * agent's sockets are destroyed, so nothing queued behind the single socket is sent afterwards. The
-   * next request opens a new connection.
+   * Closes the client for good, until reopen(). Every request still in flight is ended (rejected as
+   * `offline`, aborted, its timer cleared), lookups still waiting for a DNS answer are ended and their
+   * timers cleared, and both agents are destroyed. Node's Agent opens a new socket for the head of its
+   * queue when a socket closes, even for an aborted request, and that socket calls our `lookup`: the
+   * lookup handed out before close() therefore answers with an error at once from now on, without a
+   * DNS query and without a timer. Requests made while closed are refused as `offline` without any I/O.
    */
   close(): void {
+    this.generation.closed = true;
     const pending = this.inFlight.splice(0, this.inFlight.length);
     for (const cancel of pending) cancel();
-    const agent = this.agent;
+    this.resolve.cancelPending();
+    const agents = [this.agent, this.pollAgent];
     this.agent = null;
-    if (agent === null) return;
-    try {
-      agent.destroy();
-    } catch {
-      // nothing more to close
+    this.pollAgent = null;
+    for (const agent of agents) {
+      if (agent === null) continue;
+      try {
+        agent.destroy();
+      } catch {
+        // nothing more to close
+      }
     }
+  }
+
+  /** Opens a closed client again; the next request opens a new connection. Does nothing when open. */
+  reopen(): void {
+    if (this.generation.closed) this.generation = this.newGeneration();
   }
 
   private currentLease(): Lease {
@@ -284,9 +314,29 @@ export class HttpsClient {
     return { online: false, dns: [] };
   }
 
-  private currentAgent(): AgentLike {
+  private currentAgent(longPoll: boolean): AgentLike {
+    if (longPoll) {
+      if (this.pollAgent === null) this.pollAgent = new this.https.Agent({ keepAlive: true, maxSockets: 1 });
+      return this.pollAgent;
+    }
     if (this.agent === null) this.agent = new this.https.Agent({ keepAlive: true, maxSockets: 1 });
     return this.agent;
+  }
+
+  /** A lookup that serves this open period only: once it is closed it fails at once, with no I/O and no timer. */
+  private newGeneration(): Generation {
+    const generation: Generation = {
+      closed: false,
+      lookup: (hostname: string, options: unknown, callback: LookupCallback): void => {
+        if (!generation.closed) return this.resolve(hostname, options, callback);
+        const done = typeof options === 'function' ? (options as LookupCallback) : callback;
+        // asynchronous like Node's own lookup, through a promise job rather than a timer
+        Promise.resolve()
+          .then(() => done(Object.assign(new Error('the uplink was closed'), { code: 'EHOSTUNREACH' })))
+          .then(undefined, () => undefined);
+      },
+    };
+    return generation;
   }
 
   private readResponse(res: IncomingMessageLike, req: () => ClientRequestLike | null, finish: (error: UplinkError | null, value?: unknown) => void): void {

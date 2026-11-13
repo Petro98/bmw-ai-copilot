@@ -4,6 +4,10 @@
 // to the app's javascript. The output is committed: the MGU Store builds from the repository and has
 // no bundler.
 //
+// It also bundles the test-only entry car/src/test-entry.ts -> car/build/test-entry.js with the same
+// settings, for the Node 8.16.2 smoke test (car/test/node8-uplink-smoke.js). car/build/ is git-ignored
+// and never shipped.
+//
 //   node car/scripts/build-car.mjs          (npm run build:car)
 import { build } from 'esbuild';
 import { dirname, join } from 'node:path';
@@ -11,10 +15,8 @@ import { fileURLToPath } from 'node:url';
 
 const carDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-await build({
+const shared = {
   absWorkingDir: carDir,
-  entryPoints: ['src/main.ts'],
-  outfile: 'apps/p98_copilot/main.js',
   bundle: true,
   format: 'cjs',
   platform: 'node',
@@ -28,4 +30,7 @@ await build({
   legalComments: 'inline',
   banner: { js: '/* generated from car/src — do not edit */' },
   logLevel: 'info',
-});
+};
+
+await build({ ...shared, entryPoints: ['src/main.ts'], outfile: 'apps/p98_copilot/main.js' });
+await build({ ...shared, entryPoints: ['src/test-entry.ts'], outfile: 'build/test-entry.js' });
