@@ -60,8 +60,8 @@ iDrive Monitor app, which is not here).
 ## Local changes
 
 Edits 1-3 and 8 are in `tools/build.py`, edit 4 in `runtime/signals.js`, edit 5 in `runtime/fonts.js`, edit 6 in
-`runtime/mgu.js`, edit 7 in `runtime/display.js`, edit 9 in `runtime/display.js` and `runtime/mgu.js`; each is marked
-in the source with `[car/kit local edit N]`, and so are the cases `tools/test_runtime.js` gained for edits 7 and 9:
+`runtime/mgu.js`, edit 7 in `runtime/display.js`, edit 9 in `runtime/display.js` and `runtime/mgu.js`, edit 10 in
+`runtime/sheet.js` and `tools/build.py`; each is marked in the source with `[car/kit local edit N]`, and so are the cases `tools/test_runtime.js` gained for edits 7 and 9:
 
 1. `--preview-only`: stages the app without BMW's `oap-sdk` and stops before the installable archives, for the
    offline preview; without the flag a missing `oap-sdk` stops the build with a message. Ported from idrive7-apps
@@ -133,8 +133,18 @@ in the source with `[car/kit local edit N]`, and so are the cases `tools/test_ru
    `runtime/locales/<tag>.json` catalog through `runtime/i18n.js`) was not used: the catalogs are not vendored,
    the MGU Store builds with `build.py {id}` only (`mgu-repo.json`), and a non-English build renames the package
    version (`0.1.0-uk.1`, `tools/localize.py` `package_version`), which no longer matches the Store's
-   `car/dist/{id}@{version}.tgz`. Tested in `tools/test_runtime.js`. `runtime/sheet.js` still draws 'Version …',
-   'Done', 'Back' and 'Close' in English (not changed here).
+   `car/dist/{id}@{version}.tgz`. Tested in `tools/test_runtime.js`. The settings sheet's own words follow in
+   edit 10.
+10. The rest of the kit's words on the settings, in Ukrainian for the same reason (Plan 2 Task 9):
+   `runtime/sheet.js` `listSheet` draws «Версія …» above the settings (line 128, upstream 'Version …'), «Готово» and
+   «Назад» on its top-right button (line 134, upstream 'Done' / 'Back'), and falls back to the title «Налаштування»
+   (line 111, upstream 'Settings'; `runtime/mgu.js` already passes it, edit 9); its card sheet's button is «Закрити»
+   (line 209, upstream 'Close'). `tools/build.py` `build_ui` titles the HMI's own settings screen «Налаштування»
+   (lines 166-167, upstream 'Settings'); that title becomes a Unicode StringId like every other text cell
+   (`tools/localize.py` `unicode_resources`), as the Ukrainian setting labels of `app.json` already do. The words are
+   Cyrillic, so `runtime/fonts.js` draws them from the Ukrainian atlas (edit 5); the button text is 24 px, which the
+   atlas has. Not covered by a test case of its own: the strings are literals, and `tools/test_runtime.js` still
+   passes.
 
 ## Fonts and code added for this project (Plan 2 Task 8)
 

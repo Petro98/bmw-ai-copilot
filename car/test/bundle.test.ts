@@ -1,5 +1,4 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { expect, test } from 'vitest';
@@ -71,57 +70,8 @@ test('app.json is the autostart, read-only Copilot app the plan describes', () =
   expect((app.popups as unknown[]).length).toBe(1);
 });
 
-/** The text calls one shell frame makes, with the bundle run against a stand-in for the kit's mgu.run. */
-async function shellTexts(): Promise<Array<{ str: string; size: number; font: string }>> {
-  const texts: Array<{ str: string; size: number; font: string }> = [];
-  let frame: (() => unknown) | undefined;
-  const log = { error() {}, warn() {}, info() {}, debug() {} };
-  const canvas = {
-    clear() { return canvas; },
-    text(str: string, _x: number, _y: number, size: number, _c: unknown, opts?: { font?: string }) {
-      texts.push({ str, size, font: (opts && opts.font) || 'label' });
-      return 0;
-    },
-  };
-  const ctx = {
-    log,
-    canvas: () => canvas,
-    ui: { onVisible() {}, image: () => Promise.resolve() },
-    onLayout() {},
-    loop(_name: string, _fps: number, fn: () => unknown) { frame = fn; return { stop() {}, kick() {} }; },
-  };
-  const mgu = { log, run: (app: { start(c: unknown): unknown }) => Promise.resolve(app.start(ctx)) };
-  const fakeRequire = (id: string): unknown => {
-    if (id === './kit/mgu') return mgu;
-    throw new Error('unexpected require ' + id);
-  };
-  const mod = { exports: {} };
-  new Function('require', 'module', 'exports', bundle())(fakeRequire, mod, mod.exports);
-  await new Promise((resolve) => setImmediate(resolve));
-  expect(frame).toBeDefined();
-  await frame!();
-  return texts;
-}
-
-test('the shell word is drawn whole at every text scale the kit renders at', async () => {
-  // car/kit/runtime/record.js text(): the atlas is fonts.get(family, size * textScale, text). textScale is
-  // 1 on the software path and the renderer's place.scale otherwise (car/kit/runtime/display.js canvas()):
-  // full layout floor(min((1920 - 84) / 1576, (720 - 80 - bar) / 482) * 1000) / 1000 = 1.164 (bar 0 or 48),
-  // "fill" 1920 / 1600 = 1.2 (display.js _place, HMI, FULL).
-  const fonts = createRequire(import.meta.url)(join(carDir, 'kit', 'runtime', 'fonts.js')) as {
-    get(family: string, size: number, text: string): { size: number; glyphs: Record<string, unknown> } | null;
-  };
-  const texts = await shellTexts();
-  expect(texts.map((t) => t.str)).toContain('Copilot');
-  for (const { str, size, font } of texts) {
-    for (const scale of [1, 1.164, 1.2]) {
-      const atlas = fonts.get(font, size * scale, str);
-      expect(atlas, `${font} ${size} px x ${scale}`).not.toBeNull();
-      const missing = [...str].filter((ch) => !atlas!.glyphs[ch.codePointAt(0)!]);
-      expect(missing, `${font} ${size} px x ${scale} -> atlas ${atlas!.size} px`).toEqual([]);
-    }
-  }
-});
+// The frame the shipped app draws is rendered by `npm run check:car` (car/preview/*.png); glyph coverage of the
+// Ukrainian atlas is asserted in car/test/atlas.test.ts and car/test/package.test.ts.
 
 test('mgu-repo.json builds car/apps with the vendored kit and never requires the controller gate', () => {
   const repo = JSON.parse(readFileSync(join(repoDir, 'mgu-repo.json'), 'utf8'));

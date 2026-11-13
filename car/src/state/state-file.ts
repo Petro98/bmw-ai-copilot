@@ -1,7 +1,8 @@
 /**
  * The app's one small state file: the event engine's dwell and cooldown memory (so a restart mid-drive does
  * not repeat an alert), the owner's limits and pop-up settings as last fetched, and the device id and secret
- * the car pairs with.
+ * the car pairs with, and whether the backend has ever accepted that device (`paired`: the pairing panel shows
+ * until it has; an older file without the field loads as not paired).
  *
  * The file holds the device secret, so it is written with mode 0o600, lives only in the data directory the
  * caller passes in (the kit's ctx.dataDir), and neither its content nor a parse error message (which on newer
@@ -13,7 +14,14 @@ import type { EngineState, OwnerLimits } from '@copilot/event-engine';
 import type { FsApi } from '../platform';
 import type { Log } from '../safe';
 
-export interface PersistedState { v: 1; engine: EngineState; limits: OwnerLimits; popupsEnabled: boolean; asciiPopups: boolean; device: { id: string; secret: string } | null }
+export interface PersistedState {
+  v: 1; engine: EngineState; limits: OwnerLimits; popupsEnabled: boolean; asciiPopups: boolean; device: { id: string; secret: string } | null;
+  /**
+   * The backend has answered a request from this device as authorised (set on that answer, cleared on a 401/403).
+   * Absent means false: load() gives it only when true, so files written before it existed load unchanged.
+   */
+  paired?: boolean;
+}
 
 /** The state file's name inside the app's data directory. */
 export const STATE_FILE_NAME = 'copilot-state.json';
@@ -27,7 +35,7 @@ export const MAX_ENGINE_KEYS = 512;
 
 const LIMIT_FIELDS: Array<keyof OwnerLimits> = ['oilTempMaxC', 'coolantTempMaxC', 'battery12vMinPercent', 'tyrePressureDeviationBar'];
 
-/** Defaults: no limits, pop-ups on, ASCII off, no device, empty engine memory. Fresh objects on each call. */
+/** Defaults: no limits, pop-ups on, ASCII off, no device (so not paired), empty engine memory. Fresh objects on each call. */
 export function defaultState(): PersistedState {
   return { v: 1, engine: { keys: [] }, limits: { ...NO_LIMITS }, popupsEnabled: true, asciiPopups: false, device: null };
 }
@@ -110,7 +118,7 @@ export class StateFile {
       return defaultState();
     }
     const defaults = defaultState();
-    return {
+    const loaded: PersistedState = {
       v: 1,
       engine: engineFrom(raw.engine),
       limits: limitsFrom(raw.limits),
@@ -118,6 +126,8 @@ export class StateFile {
       asciiPopups: booleanOr(raw.asciiPopups, defaults.asciiPopups),
       device: deviceFrom(raw.device),
     };
+    if (raw.paired === true && loaded.device !== null) loaded.paired = true;
+    return loaded;
   }
 
   /** Writes the state to a temporary file (mode 0o600) and renames it into place. Logs a failure, never throws. */
@@ -131,6 +141,7 @@ export class StateFile {
         popupsEnabled: state.popupsEnabled,
         asciiPopups: state.asciiPopups,
         device: state.device,
+        paired: state.paired === true,
       });
     } catch {
       this.warn('state file: state could not be serialised, not saved');

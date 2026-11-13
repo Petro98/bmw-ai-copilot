@@ -163,7 +163,8 @@ def build_ui(spec, language='en'):
     screens = list(spec.get('screens', []))
     # a "menu" screen with "settings": true shows the settings itself: no separate settings screen
     if spec.get('settings') and not any(sc.get('settings') is True for sc in screens):
-        screens.append({'name': 'SETTINGS', 'kind': 'settings', 'title': 'Settings'})
+        # [car/kit local edit 10] the HMI's settings screen title in Ukrainian (upstream 'Settings')
+        screens.append({'name': 'SETTINGS', 'kind': 'settings', 'title': 'Налаштування'})
     state_ids = {}
     for scr in screens:
         state_ids[scr['name']] = None

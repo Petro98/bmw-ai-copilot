@@ -108,7 +108,7 @@ function listSheet(settings, title, opts) {
     const version = opts && opts.version;
     const schema = settings.schema.filter((s) => !s.hidden);
     const sh = {
-        title: title || 'Settings',
+        title: title || 'Налаштування',   // [car/kit local edit 10] upstream 'Settings'
         focus: 0, open: null, sub: 0,        // open: the setting whose values are listed
         controller: false,                  // the controller was used: show where it is
         rows() {
@@ -125,12 +125,13 @@ function listSheet(settings, title, opts) {
             const rows = this.rows();
             // the header's tab names the sheet; a value list names its setting here
             if (this.open) r.text(this.open.label, 44, TOP + 40, 32, t.text, { font: 'bold' });
-            else if (version) r.text('Version ' + version, 44, TOP + 38, 24, t.dim);
+            else if (version) r.text('Версія ' + version, 44, TOP + 38, 24, t.dim);   // [car/kit local edit 10] upstream 'Version '
             const targets = [];
             // Back (a value list) / Done (the settings): top right
             const bw = 150, bx = W - 40 - bw, by = TOP + 8;
             // (the controller reaches it turning up from the first row: place -1)
-            pill(r, t, bx, by, bw, 46, this.open ? 'Back' : 'Done', this.controller && (this.open ? this.sub : this.focus) === -1);
+            // [car/kit local edit 10] upstream 'Back' / 'Done'
+            pill(r, t, bx, by, bw, 46, this.open ? 'Назад' : 'Готово', this.controller && (this.open ? this.sub : this.focus) === -1);
             targets.push({ x: bx - 10, y: by - 6, w: bw + 20, h: 58, act: () => this.back() });
             const rects = list(r, t, this.key(), rows, this.open ? this.sub : this.focus, TOP + 74, this.controller);
             rects.forEach((q) => targets.push(Object.assign(q, { act: () => { if (this.open) this.sub = q.i; else this.focus = q.i; return this.choose(); } })));
@@ -205,7 +206,7 @@ function cardSheet(spec) {
             if (sub) r.text(fit(r, sub, 24, w - 90), x + 44, y + 102, 24, accent);
             // close: top right
             const cw = 150, cx = x + w - cw - 24, cy = y + 24;
-            pill(r, t, cx, cy, cw, 46, 'Close', this.controller && this.focus === -1);
+            pill(r, t, cx, cy, cw, 46, 'Закрити', this.controller && this.focus === -1);   // [car/kit local edit 10] upstream 'Close'
             targets.push({ x: cx - 10, y: cy - 6, w: cw + 20, h: 58, act: () => 'close' });
             // label / value tiles
             const rows = (get('rows') || []).filter(Boolean);

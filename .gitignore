@@ -12,6 +12,9 @@ car/preview/
 .env
 .env.*
 !.env.example
+# car/scripts/publish-car.mjs: the deploy directory and the backend address (docs/CAR_INSTALL.md)
+.env.car
+!.env.car.example
 
 # local data
 *.sqlite

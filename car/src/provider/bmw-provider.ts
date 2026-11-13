@@ -18,8 +18,13 @@
  * car has been quiet for staleAfterMs, and it is dropped at once when its own interface reports unavailable.
  * A polled reading is judged by its own last poll result. Odometer, service items and Check Control are
  * exempt and keep their value and their original `at`.
+ *
+ * Readings the unit cannot deliver are not-on-this-vehicle from the start: those of an interface the installer
+ * left out (`missingInterfaces`), and those whose field the deployed app.json does not declare (`missingKeys`:
+ * car/scripts/publish-car.mjs --drop-reading, for firmware that lacks a field). A field that feeds only missing
+ * readings is not subscribed at all, so the kit is never asked for a field the app did not declare.
  */
-import { available, emptySnapshot, unavailable } from '@copilot/vehicle-core';
+import { SIGNAL_CATALOGUE, available, emptySnapshot, unavailable } from '@copilot/vehicle-core';
 import type {
   Clock, Reading, SnapshotKey, VehicleCapabilities, VehicleDataProvider, VehicleSnapshot,
 } from '@copilot/vehicle-core';
@@ -35,7 +40,11 @@ export interface SignalsApi {
     opts?: { pollMs?: number }): Promise<unknown>;
 }
 
-export interface BmwProviderOptions { signals: SignalsApi; clock: Clock; log: Log; missingInterfaces: string[]; staleAfterMs?: number }
+export interface BmwProviderOptions {
+  signals: SignalsApi; clock: Clock; log: Log; missingInterfaces: string[]; staleAfterMs?: number;
+  /** Readings whose signal the deployed app.json leaves out: not-on-this-vehicle, and a field feeding only these is not watched. */
+  missingKeys?: SnapshotKey[];
+}
 
 /** A reading not refreshed for this long becomes unavailable('stale'). */
 export const DEFAULT_STALE_AFTER_MS = 300_000;
@@ -72,6 +81,15 @@ for (const raw of RAW_INTERFACES) {
 
 function kindOf(key: string): Kind {
   return KIND[key] || 'held';
+}
+
+/** Per catalogue field (`iface#field`), the readings it feeds (packages/vehicle-core/src/catalogue.ts). */
+const FIELD_KEYS: Record<string, SnapshotKey[]> = Object.create(null) as Record<string, SnapshotKey[]>;
+for (const entry of SIGNAL_CATALOGUE) {
+  const dot = entry.key.indexOf('.');
+  const key = (dot < 0 ? entry.key : entry.key.slice(0, dot)) as SnapshotKey;
+  const list = FIELD_KEYS[entry.iface + '#' + entry.field] || (FIELD_KEYS[entry.iface + '#' + entry.field] = []);
+  if (list.indexOf(key) < 0) list.push(key);
 }
 
 /** The vehicle-condition interface: the one watch that stays while suspended. */
@@ -118,6 +136,7 @@ export class BmwMguVehicleDataProvider implements VehicleDataProvider {
   private readonly log: Log;
   private readonly staleAfterMs: number;
   private readonly missing: Record<string, true> = Object.create(null) as Record<string, true>;
+  private readonly missingKeys: SnapshotKey[] = [];
   /** what the car last said, decoded; handlers write here */
   private readonly latest: VehicleSnapshot;
   /** what listeners and snapshot() see; only refresh() (and suspend()) write here */
@@ -152,6 +171,7 @@ export class BmwMguVehicleDataProvider implements VehicleDataProvider {
     this.log = options.log;
     this.staleAfterMs = typeof options.staleAfterMs === 'number' && options.staleAfterMs > 0 ? options.staleAfterMs : DEFAULT_STALE_AFTER_MS;
     for (const iface of options.missingInterfaces || []) this.missing[iface] = true;
+    for (const key of options.missingKeys || []) if (this.missingKeys.indexOf(key) < 0) this.missingKeys.push(key);
     const now = this.clock.now();
     this.latest = this.baseline(now);
     this.current = this.baseline(now);
@@ -281,6 +301,7 @@ export class BmwMguVehicleDataProvider implements VehicleDataProvider {
     for (const raw of RAW_INTERFACES) {
       if (this.missing[raw.iface]) for (const key of raw.keys) markUnavailable(s, key, 'not-on-this-vehicle');
     }
+    for (const key of this.missingKeys) markUnavailable(s, key, 'not-on-this-vehicle');
     return s;
   }
 
@@ -312,7 +333,13 @@ export class BmwMguVehicleDataProvider implements VehicleDataProvider {
       if (condition && !withCondition) continue;
       const isCurrent = condition ? () => run === this.runGen : () => rest === this.restGen;
       const handlers: Record<string, (value: unknown) => void> = {};
-      for (const field of raw.fields) handlers[field] = this.handler(raw.iface, field, raw.polled, isCurrent);
+      let fields = 0;
+      for (const field of raw.fields) {
+        if (this.fieldMissing(raw.iface, field)) continue;
+        handlers[field] = this.handler(raw.iface, field, raw.polled, isCurrent);
+        fields++;
+      }
+      if (fields === 0) continue;
       let pending: Promise<unknown>;
       try {
         pending = Promise.resolve(this.signals.watch(raw.iface, SIGNAL_INSTANCE, handlers, this.log, raw.polled ? { pollMs: POLL_MS } : undefined));
@@ -328,6 +355,14 @@ export class BmwMguVehicleDataProvider implements VehicleDataProvider {
       ));
     }
     return Promise.all(jobs).then(() => undefined);
+  }
+
+  /** True for a catalogue field every reading of which is missing (its signal is not declared on this unit). */
+  private fieldMissing(iface: string, field: string): boolean {
+    const keys = FIELD_KEYS[iface + '#' + field];
+    if (!keys || this.missingKeys.length === 0) return false;
+    for (const key of keys) if (this.missingKeys.indexOf(key) < 0) return false;
+    return true;
   }
 
   /** A signal handler: decodes into `latest` and marks it changed, nothing else (while suspended: queues a refresh). */

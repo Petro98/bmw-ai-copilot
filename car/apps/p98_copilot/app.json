@@ -30,5 +30,6 @@
   ],
   "popups": [
     { "name": "ALERT_POP", "type": "popUp", "widget": "LT_State_PopupSmall", "label": "text3", "button": "OK" }
-  ]
+  ],
+  "config": { "backendUrl": null }
 }
