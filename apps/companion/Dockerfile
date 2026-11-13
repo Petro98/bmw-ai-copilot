@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# Phone panel image: the Angular production build served by nginx, which also proxies /api to the backend.
+# Phone panel image: the Angular production build served by nginx, which also proxies /api and /car/v1 to the backend.
 # Build context: the repository root (docker-compose.yml sets it), because the panel imports the API types
 # type-only from packages/*/src through its tsconfig `paths`, e.g.
 #   docker build -f apps/companion/Dockerfile -t bmw-copilot-panel .
@@ -16,12 +16,12 @@ RUN npm ci --no-audit --no-fund
 COPY packages/vehicle-core/src /app/packages/vehicle-core/src
 COPY packages/event-engine/src /app/packages/event-engine/src
 COPY packages/shared/src /app/packages/shared/src
-COPY apps/companion/angular.json apps/companion/tsconfig.json apps/companion/tsconfig.app.json apps/companion/tsconfig.spec.json ./
+COPY apps/companion/angular.json apps/companion/ngsw-config.json apps/companion/tsconfig.json apps/companion/tsconfig.app.json apps/companion/tsconfig.spec.json ./
 COPY apps/companion/public ./public
 COPY apps/companion/src ./src
 RUN npm run build
 
-# --- serve: static files plus the /api reverse proxy -----------------------------------------------------------------
+# --- serve: static files plus the /api and /car/v1 reverse proxy -----------------------------------------------------------------
 FROM ${NGINX_IMAGE} AS serve
 COPY apps/companion/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/apps/companion/dist/companion/browser /usr/share/nginx/html
