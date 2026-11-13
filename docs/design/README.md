@@ -4,7 +4,8 @@ A quiet instrument for one driver. Two surfaces share this system: the app drawn
 
 - Write interface copy in Ukrainian, sentence case, no exclamation marks, no emoji. Labels are upper case and set in `label`.
 - Say only what the car reported. A value the car did not send is shown as «Недоступно» with the reason under it, never as a dash, a zero or an estimate.
-- Every warning names where it comes from, as a tag set in `label`: «BMW CHECK CONTROL», «СЕРВІС BMW», «ВАШ ЛІМІТ». A limit the owner typed in is always called the owner's, never the manufacturer's.
+- Every warning names where it comes from, as a tag set in `label`: «BMW CHECK CONTROL», «СЕРВІС BMW», «ПАМ'ЯТЬ ПОМИЛОК BMW», «ВАШ ЛІМІТ». A limit the owner typed in is always called the owner's, never the manufacturer's. «ПАМ'ЯТЬ ПОМИЛОК BMW» marks a fault code read from a control unit's fault memory; whether it is active now is stated with the code.
+- Every warning also names its severity as a word: «КРИТИЧНО» (critical), «ПОПЕРЕДЖЕННЯ» (warning), «ДО ВІДОМА» (information).
 - Numbers carry their unit after a space: «92 °C», «452 км», «2,3 бар». Decimal comma. Use the units the car displays.
 - While the car is moving an answer is three lines at most, set in `answer-driving`. Standing, up to eight lines in `answer`.
 - The assistant advises and never commands the car: «перевірте при нагоді», not «зупиніться негайно», unless the car's own message says so.

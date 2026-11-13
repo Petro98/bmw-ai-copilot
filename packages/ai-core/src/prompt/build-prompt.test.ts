@@ -179,6 +179,24 @@ describe('buildPrompt', () => {
     expect(text).not.toContain('cleared one');
   });
 
+  test('a stored BMW fault carries the panel\'s tag «ПАМ\'ЯТЬ ПОМИЛОК BMW», in the alerts and in the instructions', () => {
+    const tag = 'ПАМ\'ЯТЬ ПОМИЛОК BMW';
+    const text = buildPrompt(input({
+      alerts: [alert({ id: 'f', ruleId: 'fault-status', dedupKey: 'fault:1', provenance: 'bmw-fault-status', severity: 'warning', title: 'Помилка' })],
+    })).system[1].text;
+    expect(text).toContain(`${tag}, попередження: «Помилка»`);
+    expect(text).not.toContain('ПОМИЛКА BMW');
+    expect(STATIC_INSTRUCTIONS).toContain(`«${tag}»`);
+    expect(STATIC_INSTRUCTIONS).not.toContain('ПОМИЛКА BMW');
+    for (const other of ['«BMW CHECK CONTROL»', '«СЕРВІС BMW»', '«ВАШ ЛІМІТ»']) expect(STATIC_INSTRUCTIONS).toContain(other);
+  });
+
+  test('the instructions describe a «ПАМ\'ЯТЬ ПОМИЛОК BMW» alert as a code the car marks active now, never as possibly absent', () => {
+    // Only the fault-status rule carries this provenance, and it fires only for activeNow && warningLamp (spec §7).
+    expect(STATIC_INSTRUCTIONS).toContain('який авто позначило як активний зараз із запитом лампи попередження');
+    expect(STATIC_INSTRUCTIONS).not.toContain('не обовʼязково означає');
+  });
+
   test('the volatile block follows the specified section order', () => {
     const text = buildPrompt(input({ vehicleLabel: 'BMW X3 G01', trendSummary: 'Температура масла за 7 днів: 88–95 °C' })).system[1].text;
     const order = ['РУХ:', 'BMW X3 G01', 'ДАНІ АВТО', 'АКТИВНІ СПОВІЩЕННЯ', 'ЛІМІТИ ВЛАСНИКА', 'ІСТОРІЯ'].map((s) => text.indexOf(s));

@@ -11,11 +11,15 @@ const CACHED_BLOCK: SystemBlock = Object.freeze({
   cache_control: Object.freeze({ type: 'ephemeral' as const }),
 });
 
-/** Provenance tags as in docs/design/README.md; `bmw-fault-status` has no tag there, see the report. */
+/**
+ * Provenance tags as in docs/design/README.md (Content), the same words the panel shows. A fault code read
+ * from a control unit's fault memory is «ПАМ'ЯТЬ ПОМИЛОК BMW»; the only rule with this provenance raises it
+ * when the car marks the code active now with the warning lamp requested (spec §7).
+ */
 const PROVENANCE_TAG: Record<Provenance, string> = {
   'bmw-check-control': 'BMW CHECK CONTROL',
   'bmw-service': 'СЕРВІС BMW',
-  'bmw-fault-status': 'ПОМИЛКА BMW',
+  'bmw-fault-status': 'ПАМ\'ЯТЬ ПОМИЛОК BMW',
   'owner-configured': 'ВАШ ЛІМІТ',
 };
 

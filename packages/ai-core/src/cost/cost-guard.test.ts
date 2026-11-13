@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import type { Usage, UsageStore } from '../types';
 import { CostGuard, type CostGuardOptions } from './cost-guard';
-import { costUsd, PRICES } from './prices';
+import { costUsd, costUsdDetailed, FALLBACK_PRICE, priceFor, PRICES } from './prices';
 
 /** In-memory UsageStore keyed by UTC day 'YYYY-MM-DD'. */
 class MemoryUsageStore implements UsageStore {
@@ -55,11 +55,33 @@ describe('costUsd', () => {
     expect(costUsd('mock', million)).toBe(0);
   });
 
-  test('an unknown model is priced as the most expensive listed one', () => {
+  test('a listed non-default model is priced at its own rates', () => {
+    const million = usage(1_000_000, 1_000_000, 1_000_000, 1_000_000);
+    expect(costUsd('claude-fable-5-2', million)).toBeCloseTo(8 + 40 + 0.2 + 10, 9);
+    expect(costUsd('claude-fable-5', million)).toBeCloseTo(10 + 50 + 1 + 12.5, 9);
+    expect(costUsd('claude-opus-4-8', million)).toBeCloseTo(5 + 25 + 0.5 + 6.25, 9);
+    expect(costUsd('claude-sonnet-4-6', million)).toBeCloseTo(3 + 15 + 0.3 + 3.75, 9);
+    expect(costUsd('claude-haiku-4-5', million)).toBeCloseTo(1 + 5 + 0.1 + 1.25, 9);
+    expect(costUsdDetailed('claude-opus-4-8', million)).toEqual({ usd: costUsd('claude-opus-4-8', million), fallback: false });
+    expect(priceFor('claude-sonnet-5')).toEqual({ price: PRICES['claude-sonnet-5'], fallback: false });
+  });
+
+  test('an unknown model is priced at the highest rate of each component and reported as a fallback', () => {
+    const tokens = (u: Partial<Usage>) => ({ ...usage(0), ...u });
+    expect(FALLBACK_PRICE).toEqual({ inputPerMTok: 10, outputPerMTok: 50, cacheReadPerMTok: 1, cacheWritePerMTok: 12.5 });
+    for (const key of ['inputPerMTok', 'outputPerMTok', 'cacheReadPerMTok', 'cacheWritePerMTok'] as const) {
+      expect(FALLBACK_PRICE[key]).toBe(Math.max(...Object.values(PRICES).map((p) => p[key])));
+    }
+    expect(costUsd('some-future-model', tokens({ inputTokens: 1_000_000 }))).toBeCloseTo(10, 9);
+    expect(costUsd('some-future-model', tokens({ outputTokens: 1_000_000 }))).toBeCloseTo(50, 9);
+    expect(costUsd('some-future-model', tokens({ cacheReadTokens: 1_000_000 }))).toBeCloseTo(1, 9);
+    expect(costUsd('some-future-model', tokens({ cacheWriteTokens: 1_000_000 }))).toBeCloseTo(12.5, 9);
+
     const u = usage(1234, 567, 8910, 1112);
-    const mostExpensive = Math.max(...Object.keys(PRICES).map((m) => costUsd(m, u)));
-    expect(costUsd('some-future-model', u)).toBe(costUsd('claude-opus-5-5', u));
-    expect(costUsd('some-future-model', u)).toBe(mostExpensive);
+    for (const m of Object.keys(PRICES)) expect(costUsd('some-future-model', u)).toBeGreaterThanOrEqual(costUsd(m, u));
+    expect(costUsdDetailed('some-future-model', u)).toEqual({ usd: costUsd('some-future-model', u), fallback: true });
+    expect(priceFor('some-future-model')).toEqual({ price: FALLBACK_PRICE, fallback: true });
+    expect(priceFor('toString').fallback).toBe(true);                               // no prototype lookups
   });
 });
 
