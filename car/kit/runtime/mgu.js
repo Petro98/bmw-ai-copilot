@@ -584,8 +584,8 @@ async function runInner(impl) {
         /** The surface to draw one frame on (record.js Recorder, reused): pass it to ui.image. */
         canvas(w, h) { return display.canvas(w, h); },
         /**
-         * Run fn while screen `stateName` is visible: once per screen refresh (up to 60 fps)
-         * when the GPU renderer shows it, else about `fps` times a second.
+         * Run fn while screen `stateName` is visible, about `fps` times a second (on the GPU renderer as
+         * well: car/kit local edit 6).
          */
         loop(stateName, fps, fn) {
             let timer = null, on = false, running = false, frames = 0, spent = 0;
@@ -604,25 +604,24 @@ async function runInner(impl) {
                 if (!gpuOn() && frames % 3 === 0 && typeof global.gc === 'function') { try { global.gc(); } catch (e) { /* ignore */ } }
                 if (frames % (gpuOn() ? 600 : 100) === 0) {
                     const n = gpuOn() ? 600 : 100, tm = ui.timing, png = Math.round(tm.png / n), push = Math.round(tm.push / n), all = (spent / n).toFixed(1);
-                    log.info('loop ' + stateName + ': ' + all + ' ms per frame in JS' + (gpuOn() ? ' (GPU renderer)' : ' (draw ' + Math.max(0, all - png - push) + ', png ' + png + ', hmi ' + push + '; asked for ' + fps + ' fps)'));
+                    // [car/kit local edit 6] debug, not info: a line every 100 / 600 frames is a periodic log line
+                    log.debug('loop ' + stateName + ': ' + all + ' ms per frame in JS' + (gpuOn() ? ' (GPU renderer)' : ' (draw ' + Math.max(0, all - png - push) + ', png ' + png + ', hmi ' + push + '; asked for ' + fps + ' fps)'));
                     spent = 0; tm.png = 0; tm.push = 0;
                 }
                 schedule(dt);
             };
+            // [car/kit local edit 6] about `fps` turns a second on both paths. Upstream ran fn once per renderer
+            // tick on the GPU path and, when a frame was not sent (unchanged), looked again after 16 ms: up to
+            // 60 turns a second whatever fps the app asked for. A renderer tick now only starts the paced timer
+            // when none is pending.
             const schedule = (dt) => {
                 if (!on || timer !== null || running) return;
-                if (gpuOn()) {
-                    // the renderer sends a tick when it can take the next frame; if this frame was
-                    // not sent (unchanged), look again shortly
-                    // (a tick normally follows a sent frame; 250 ms is the safety net if none comes)
-                    timer = setTimeout(tick, display.gpu.waiting ? 250 : 16);
-                } else timer = setTimeout(tick, Math.max(15, 1000 / fps - (dt || 0)));
+                timer = setTimeout(tick, Math.max(15, 1000 / fps - (dt || 0)));
             };
             display.onTick(() => {
-                // a tick from the renderer, or the renderer went away (then back to the timer)
-                if (!on || running) return;
-                if (timer !== null) { clearTimeout(timer); timer = null; }
-                if (gpuOn()) tick(); else schedule(0);
+                // a tick from the renderer, or the renderer went away: the next turn at the asked pace
+                if (!on || running || timer !== null) return;
+                schedule(0);
             });
             const set = (v) => {
                 on = v;

@@ -5,8 +5,9 @@
 // no bundler.
 //
 // It also bundles the test-only entry car/src/test-entry.ts -> car/build/test-entry.js with the same
-// settings, for the Node 8.16.2 smoke test (car/test/node8-uplink-smoke.js). car/build/ is git-ignored
-// and never shipped.
+// settings, for the Node 8.16.2 smoke test (car/test/node8-uplink-smoke.js), and the preview-only entry
+// car/src/preview-entry.ts -> car/build/preview-entry.js, the screens drawn from a fixture for the offline
+// preview (car/scripts/preview-car.sh). car/build/ is git-ignored and never shipped.
 //
 //   node car/scripts/build-car.mjs          (npm run build:car)
 import { build } from 'esbuild';
@@ -34,3 +35,4 @@ const shared = {
 
 await build({ ...shared, entryPoints: ['src/main.ts'], outfile: 'apps/p98_copilot/main.js' });
 await build({ ...shared, entryPoints: ['src/test-entry.ts'], outfile: 'build/test-entry.js' });
+await build({ ...shared, entryPoints: ['src/preview-entry.ts'], outfile: 'build/preview-entry.js' });

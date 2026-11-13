@@ -106,6 +106,16 @@ class Display {
             if (name !== this.screen.name) return;
             if (v) this.barOff = 0;                   // the HMI builds the screen afresh
             if (!v) this.closeSheet();
+            // [car/kit local edit 7] no timer of the display's while the screen is hidden: the keep-alive
+            // starts again when the screen shows (with a frame to keep) or with the next frame; a renderer
+            // connection that is not up is let go (renderd.js would retry it every 3 s), and the renderer is
+            // looked for again when the screen shows
+            if (!v) {
+                if (this.keepTimer) { clearInterval(this.keepTimer); this.keepTimer = null; }
+                if (this.poll) { clearInterval(this.poll); this.poll = null; }
+                if (this.gpu && !this.gpu.ready) this._dropGpu();
+            } else if (this.wantGpu && !this.gpu && !this.poll) this._mode();
+            else if (this.gpu && this.last) this._startKeep();
             this._syncVisible();
         });
         if (this.ui.onFocus) this.ui.onFocus((name) => { if (name === this.screen.name) { this._syncVisible(); this._lost(); } });
@@ -143,6 +153,7 @@ class Display {
     /** Start / stop the GPU path for the 'renderer' setting; wait for the socket if it isn't there yet. */
     _mode() {
         const want = (process.env.MGU_RENDERER || this.settings.get('renderer') || 'auto') !== 'software';
+        this.wantGpu = want;
         if (this.poll) { clearInterval(this.poll); this.poll = null; }
         if (!want) {
             if (this.gpu) { this.gpu.show(false); this.gpu.close(); this.gpu = null; this.place = null; this._lost(); }
@@ -151,8 +162,13 @@ class Display {
         }
         if (this.gpu) return;
         const file = process.env.MGU_RENDERD_FILE;       // testing: write the stream for mgu-renderd --replay
+        // [car/kit local edit 7] no renderer client while the screen is hidden (an autostart app starts hidden; a
+        // connection that never gets up would be retried every 3 s by renderd.js): the screen showing calls _mode()
+        if (!file && !this.ui.isVisible(this.screen.name)) return;
         if (file || RenderClient.available()) { this._startGpu(file); return; }
-        this.log.info('display: no mgu-renderd socket - software rendering until it appears');
+        // [car/kit local edit 7] said once, and looked for every 5 s only while the screen shows (onVisible)
+        if (!this.noRendererSaid) { this.noRendererSaid = true; this.log.info('display: no mgu-renderd socket - software rendering until it appears'); }
+        if (!this.ui.isVisible(this.screen.name)) return;
         this.poll = setInterval(() => {
             if (RenderClient.available()) { clearInterval(this.poll); this.poll = null; this._startGpu(); }
         }, 5000);
@@ -164,7 +180,13 @@ class Display {
         const gpu = this.gpu = new RenderClient(this.spec.id, this.log, Object.assign({ native }, file ? { file } : {}));
         gpu.on('ready', () => { if (this.gpu !== gpu) return; this._place(); this._syncVisible(); this._grab(); });
         gpu.on('tick', () => { if (this.gpu === gpu) { this.tickT = Date.now(); this.tickHandlers.forEach((fn) => fn()); } });
-        gpu.on('close', () => { if (this.gpu === gpu) { clearTimeout(this.frontTimer); this.blocked = false; this._lost(); } });
+        gpu.on('close', () => {
+            if (this.gpu !== gpu) return;
+            // [car/kit local edit 7] lost while the screen is hidden: let it go (no 3 s retry while hidden); the
+            // screen showing again looks for the renderer (onVisible)
+            if (!this.ui.isVisible(this.screen.name)) { this._dropGpu(); return; }
+            clearTimeout(this.frontTimer); this.blocked = false; this._lost();
+        });
         gpu.on('stats', (s) => { this.gpuStats = s; });
         // mgu-render/1: the renderer shows the app only while its foreground gate has it in front. A screen
         // that stays shown here while the gate says otherwise (seen: a leftover install claiming the same
@@ -189,7 +211,8 @@ class Display {
         gpu.on('touch', (phase, x, y) => { if (this.gpu === gpu) this._touch(phase, x, y); });
         // the HMI was touched outside the tabs: shown again unless that left the screen
         gpu.on('closed', () => setTimeout(() => { if (this.gpu === gpu) this._syncVisible(); }, 700));
-        G.onLayerDrop((id) => { if (this.gpu) this.gpu.dropLayer(id); });
+        // [car/kit local edit 7] once: the client can now be started again (after _dropGpu)
+        if (!this.layerDropOn) { this.layerDropOn = true; G.onLayerDrop((id) => { if (this.gpu) this.gpu.dropLayer(id); }); }
         gpu.connect();
         if (this.grabbing) gpu.grab(true);
     }
@@ -199,11 +222,25 @@ class Display {
         this.grabbing = !!on;
         this._grab();
     }
-    /** held: the app asked (grab), or the kit runs the screen (own) and the HMI has the controller gate */
+    /**
+     * held only when the app asked (grab). [car/kit local edit 7] Upstream also held it whenever the kit runs
+     * the screen (own) and the HMI has the controller gate, whether or not the screen shows (renderd.js then
+     * re-sends the grab every 500 ms for as long as it holds); this app uses neither the gate nor the grab
+     * (spec §6.4), so the kit never takes the controller on its own.
+     */
     _grab() {
         if (!this.gpu) return;
-        const gate = !this.gpu.native || !this.gpu.info || this.gpu.info.controller;
-        this.gpu.grab(this.grabbing || (this.own() && gate && !process.env.MGU_NO_GRAB));
+        this.gpu.grab(this.grabbing);
+    }
+
+    /** [car/kit local edit 7] Let the renderer client go (no reconnect timer); _mode() starts a new one. */
+    _dropGpu() {
+        const g = this.gpu;
+        if (!g) return;
+        clearTimeout(this.frontTimer); this.blocked = false;
+        this.gpu = null; this.place = null;
+        g.close();
+        this._lost();
     }
 
     /** The kit runs the screen: mgu-render/1 with touch, full-screen layout. */
@@ -770,14 +807,23 @@ class Display {
             name, softImage, w: r.w, h: r.h,
             frame: { words: () => words, atlases: new Set(r.atlases), ramps: new Set(r.ramps), layersUsed: new Set(r.layersUsed || []), images: new Set(r.images || []) },
         };
-        if (!this.keepTimer) {
-            this.keepTimer = setInterval(() => {
-                // apps that draw only on changes still send a frame every second (renderer watchdog)
-                if (this.last && this.active() && Date.now() - this.lastSent >= 1000) { this.lastSent = Date.now(); this.gpu.frame(this.last.frame); }
-                this._softIfNoTick();
-            }, 500);
-            if (this.keepTimer.unref) this.keepTimer.unref();
-        }
+        this._startKeep();
+    }
+
+    /**
+     * [car/kit local edit 7] The keep-alive interval: only with a renderer (the keep-alive is for it; the software
+     * path's HMI image stays as it is) and only while the screen shows (onVisible stops it, and starts it again
+     * when the screen shows with a frame to keep: the app's first frame after showing may be identical and not
+     * sent, _send).
+     */
+    _startKeep() {
+        if (this.keepTimer || !this.gpu || !this.ui.isVisible(this.screen.name)) return;
+        this.keepTimer = setInterval(() => {
+            // apps that draw only on changes still send a frame every second (renderer watchdog)
+            if (this.last && this.active() && Date.now() - this.lastSent >= 1000) { this.lastSent = Date.now(); this.gpu.frame(this.last.frame); }
+            this._softIfNoTick();
+        }, 500);
+        if (this.keepTimer.unref) this.keepTimer.unref();
     }
 
     /**
@@ -800,7 +846,8 @@ class Display {
         const now = Date.now();
         if (now - this.statT >= 10000) {
             const g = this.gpuStats;
-            this.log.info('display: ' + Math.round(this.frames * 1000 / (now - this.statT)) + ' fps sent' +
+            // [car/kit local edit 7] debug, not info: every 10 s while frames are sent is a periodic log line
+            this.log.debug('display: ' +Math.round(this.frames * 1000 / (now - this.statT)) + ' fps sent' +
                 (g ? ', renderer ' + g.fps + ' fps, ' + (g.avgUs / 1000).toFixed(2) + ' ms per frame (max ' + (g.maxUs / 1000).toFixed(1) + ')' : ''));
             this.frames = 0; this.statT = now;
         }
