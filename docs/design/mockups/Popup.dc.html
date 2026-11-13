@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<title>Вікно-попередження Copilot поверх іншого екрана авто</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Ubuntu+Sans:wght@300;400;500;700&display=swap">
+<style>
+body{margin:0}
+a{color:#6fc3ff}a:hover{color:#f2f5f8}
+button{font:inherit}
+</style>
+</helmet>
+<div style="position: relative; width: 1920px; height: 720px; box-sizing: border-box; overflow: hidden; background: #05070a; color: #f2f5f8; font-family: 'Ubuntu Sans', Ubuntu, system-ui, sans-serif">
+  <div style="position: absolute; left: 40px; top: 40px; width: 1840px; height: 640px; box-sizing: border-box; display: flex; align-items: flex-end; padding: 24px 32px; border: 1px dashed #2c3642; border-radius: 12px">
+    <span style="font-size: 18px; line-height: 22px; font-weight: 500; letter-spacing: 0.08em; color: #a3afbc">ІНШИЙ ЕКРАН ГОЛОВНОГО БЛОКА: НАВІГАЦІЯ АБО ANDROID AUTO</span>
+  </div>
+  <div role="dialog" aria-label="Попередження Copilot" style="position: absolute; left: 520px; top: 192px; width: 880px; box-sizing: border-box; display: flex; flex-direction: column; gap: 16px; padding: 40px; border: 2px solid #647283; border-radius: 12px; background: #171d25">
+    <span style="font-size: 18px; line-height: 22px; font-weight: 500; letter-spacing: 0.08em; color: #a3afbc">COPILOT</span>
+    <p style="margin: 0; font-size: 30px; line-height: 40px; font-weight: 500">Авто повідомляє: тиск у шинах, задня ліва.</p>
+    <p style="margin: 0; font-size: 24px; line-height: 34px; color: #a3afbc">Відкрийте Copilot, щоб побачити пояснення.</p>
+    <div style="display: flex; justify-content: flex-end; margin-top: 8px">
+      <button type="button" style="height: 88px; min-width: 220px; padding: 0 40px; border: 0; border-radius: 12px; background: #6fc3ff; color: #04121f; font-size: 28px; line-height: 34px; font-weight: 500">OK</button>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1920,"height":720}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<title>Copilot на телефоні: налаштування</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Ubuntu+Sans:wght@300;400;500;700&display=swap">
+<style>
+body{margin:0}
+a{color:#6fc3ff}a:hover{color:#f2f5f8}
+button{font:inherit}
+</style>
+</helmet>
+<div style="width: 412px; height: 892px; box-sizing: border-box; display: flex; flex-direction: column; overflow: hidden; background: #05070a; color: #f2f5f8; font-family: 'Ubuntu Sans', Ubuntu, system-ui, sans-serif">
+  <header style="height: 64px; flex-shrink: 0; box-sizing: border-box; display: flex; align-items: center; padding: 0 20px">
+    <span style="font-size: 22px; line-height: 28px; font-weight: 500">Налаштування</span>
+  </header>
+  <main style="flex-grow: 1; min-height: 0; box-sizing: border-box; display: flex; flex-direction: column; gap: 18px; padding: 4px 16px 16px">
+    <section style="display: flex; flex-direction: column; gap: 8px">
+      <span style="font-size: 13px; line-height: 16px; font-weight: 500; letter-spacing: 0.08em; color: #a3afbc">МОЇ ЛІМІТИ</span>
+      <p style="margin: 0; font-size: 15px; line-height: 21px; color: #a3afbc">Це ваші власні межі, а не значення BMW. Поки ліміт не задано, попереджень за ним немає.</p>
+      <div style="display: flex; flex-direction: column; border-radius: 12px; background: #0e1217">
+        <button type="button" style="height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; border: 0; border-bottom: 1px solid #2c3642; background: none; color: #f2f5f8; text-align: left; font-size: 17px; line-height: 24px">Температура масла<span style="color: #a3afbc">Не задано</span></button>
+        <button type="button" style="height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; border: 0; border-bottom: 1px solid #2c3642; background: none; color: #f2f5f8; text-align: left; font-size: 17px; line-height: 24px">Охолоджувальна рідина<span style="color: #a3afbc">Не задано</span></button>
+        <button type="button" style="height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; border: 0; border-bottom: 1px solid #2c3642; background: none; color: #f2f5f8; text-align: left; font-size: 17px; line-height: 24px">Акумулятор 12 В<span style="color: #a3afbc">Не задано</span></button>
+        <button type="button" style="height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; border: 0; background: none; color: #f2f5f8; text-align: left; font-size: 17px; line-height: 24px">Відхилення тиску в шинах<span style="color: #a3afbc">Не задано</span></button>
+      </div>
+    </section>
+    <section style="display: flex; flex-direction: column; gap: 8px">
+      <span style="font-size: 13px; line-height: 16px; font-weight: 500; letter-spacing: 0.08em; color: #a3afbc">ПОПЕРЕДЖЕННЯ В АВТО</span>
+      <div style="display: flex; flex-direction: column; border-radius: 12px; background: #0e1217">
+        <label style="min-height: 52px; box-sizing: border-box; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 16px; border-bottom: 1px solid #2c3642; font-size: 17px; line-height: 24px">Вікна на екрані авто<input type="checkbox" checked style="width: 24px; height: 24px; flex-shrink: 0; margin: 0; accent-color: #6fc3ff"></label>
+        <label style="min-height: 52px; box-sizing: border-box; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px; font-size: 17px; line-height: 24px"><span style="display: flex; flex-direction: column; gap: 2px">Читання пам'яті помилок<span style="font-size: 15px; line-height: 21px; color: #a3afbc">Вимкнено, доки ви не погодите перевірку в авто</span></span><input type="checkbox" style="width: 24px; height: 24px; flex-shrink: 0; margin: 0; accent-color: #6fc3ff"></label>
+      </div>
+    </section>
+    <section style="display: flex; flex-direction: column; gap: 8px">
+      <span style="font-size: 13px; line-height: 16px; font-weight: 500; letter-spacing: 0.08em; color: #a3afbc">CLAUDE</span>
+      <div style="display: flex; flex-direction: column; border-radius: 12px; background: #0e1217">
+        <button type="button" style="height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; border: 0; border-bottom: 1px solid #2c3642; background: none; color: #f2f5f8; text-align: left; font-size: 17px; line-height: 24px">Модель<span style="color: #a3afbc">claude-opus-5-5</span></button>
+        <button type="button" style="height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; border: 0; background: none; color: #f2f5f8; text-align: left; font-size: 17px; line-height: 24px">Модель для голосу<span style="color: #a3afbc">Та сама</span></button>
+      </div>
+    </section>
+  </main>
+  <nav aria-label="Розділи" style="height: 72px; flex-shrink: 0; box-sizing: border-box; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid #2c3642">
+    <a href="PhoneTalk.dc.html" style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: #a3afbc; text-decoration: none; font-size: 13px; line-height: 16px; font-weight: 500">
+      <svg aria-hidden="true" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#a3afbc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0"></path><path d="M12 18v3"></path></svg>
+      Голос
+    </a>
+    <a href="PhoneCar.dc.html" style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: #a3afbc; text-decoration: none; font-size: 13px; line-height: 16px; font-weight: 500">
+      <svg aria-hidden="true" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#a3afbc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"></path></svg>
+      Авто
+    </a>
+    <a href="PhoneSettings.dc.html" style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: #6fc3ff; text-decoration: none; font-size: 13px; line-height: 16px; font-weight: 500">
+      <svg aria-hidden="true" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#6fc3ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h8"></path><path d="M18 7h2"></path><path d="M4 17h2"></path><path d="M12 17h8"></path><circle cx="15" cy="7" r="2.5"></circle><circle cx="9" cy="17" r="2.5"></circle></svg>
+      Налаштування
+    </a>
+  </nav>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":412,"height":892}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>

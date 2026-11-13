@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<title>Copilot на телефоні: стан авто і сповіщення</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Ubuntu+Sans:wght@300;400;500;700&display=swap">
+<style>
+body{margin:0}
+a{color:#6fc3ff}a:hover{color:#f2f5f8}
+button{font:inherit}
+</style>
+</helmet>
+<div style="width: 412px; height: 892px; box-sizing: border-box; display: flex; flex-direction: column; overflow: hidden; background: #05070a; color: #f2f5f8; font-family: 'Ubuntu Sans', Ubuntu, system-ui, sans-serif">
+  <header style="height: 64px; flex-shrink: 0; box-sizing: border-box; display: flex; align-items: center; justify-content: space-between; padding: 0 20px">
+    <span style="font-size: 22px; line-height: 28px; font-weight: 500">Авто</span>
+    <div style="display: flex; align-items: center; gap: 14px; font-size: 13px; line-height: 16px; font-weight: 500; letter-spacing: 0.08em; color: #a3afbc">
+      <span style="display: flex; align-items: center; gap: 4px"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6fc3ff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg>АВТО</span>
+      <span style="display: flex; align-items: center; gap: 4px"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6fc3ff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg>CLAUDE</span>
+    </div>
+  </header>
+  <main style="flex-grow: 1; min-height: 0; box-sizing: border-box; display: flex; flex-direction: column; gap: 12px; padding: 8px 16px 16px">
+    <span style="font-size: 13px; line-height: 16px; font-weight: 500; letter-spacing: 0.08em; color: #a3afbc">ЗАРАЗ · ОНОВЛЕНО О 12:41</span>
+    <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px">
+      <div style="display: flex; flex-direction: column; gap: 6px; padding: 14px 16px; border-radius: 12px; background: #171d25">
+        <span style="font-size: 13px; line-height: 16px; font-weight: 500; letter-spacing: 0.08em; color: #a3afbc">МАСЛО</span>
+        <span style="font-size: 30px; line-height: 36px">92 <span style="font-size: 16px; color: #a3afbc">°C</span></span>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px; padding: 14px 16px; border-radius: 12px; background: #171d25">
+        <span style="font-size: 13px; line-height: 16px; font-weight: 500; letter-spacing: 0.08em; color: #a3afbc">ОХОЛОДЖ. РІДИНА</span>
+        <span style="font-size: 30px; line-height: 36px">88 <span style="font-size: 16px; color: #a3afbc">°C</span></span>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px; padding: 14px 16px; border-radius: 12px; background: #171d25">
+        <span style="font-size: 13px; line-height: 16px; font-weight: 500; letter-spacing: 0.08em; color: #a3afbc">АКУМУЛЯТОР 12 В</span>
+        <span style="font-size: 30px; line-height: 36px">84 <span style="font-size: 16px; color: #a3afbc">%</span></span>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px; padding: 14px 16px; border-radius: 12px; background: #171d25">
+        <span style="font-size: 13px; line-height: 16px; font-weight: 500; letter-spacing: 0.08em; color: #a3afbc">ПАЛЬНЕ</span>
+        <span style="font-size: 30px; line-height: 36px">41 <span style="font-size: 16px; color: #a3afbc">л</span></span>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px; padding: 14px 16px; border-radius: 12px; background: #171d25">
+        <span style="font-size: 13px; line-height: 16px; font-weight: 500; letter-spacing: 0.08em; color: #a3afbc">ЗАПАС ХОДУ</span>
+        <span style="font-size: 30px; line-height: 36px">452 <span style="font-size: 16px; color: #a3afbc">км</span></span>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px; padding: 14px 16px; border-radius: 12px; background: #171d25">
+        <span style="font-size: 13px; line-height: 16px; font-weight: 500; letter-spacing: 0.08em; color: #a3afbc">ШИНА ЗАДНЯ ЛІВА</span>
+        <span style="font-size: 30px; line-height: 36px">2,0 <span style="font-size: 16px; color: #a3afbc">бар · ціль 2,4</span></span>
+      </div>
+    </div>
+    <span style="margin-top: 8px; font-size: 13px; line-height: 16px; font-weight: 500; letter-spacing: 0.08em; color: #a3afbc">СПОВІЩЕННЯ</span>
+    <div style="display: flex; flex-direction: column; gap: 8px">
+      <button type="button" style="box-sizing: border-box; display: flex; align-items: center; gap: 14px; padding: 14px 16px; border: 0; border-radius: 12px; background: #0e1217; color: #f2f5f8; text-align: left">
+        <svg aria-hidden="true" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#ffc24a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0"><path d="M12 4l9 16H3z"></path><path d="M12 10v4"></path><path d="M12 17v.5"></path></svg>
+        <span style="display: flex; flex-direction: column; gap: 6px; min-width: 0">
+          <span style="font-size: 17px; line-height: 24px; font-weight: 500">Тиск у шинах: задня ліва</span>
+          <span style="font-size: 13px; line-height: 16px; font-weight: 500; letter-spacing: 0.08em; color: #a3afbc">ПОПЕРЕДЖЕННЯ · BMW CHECK CONTROL · 12:36</span>
+        </span>
+      </button>
+      <button type="button" style="box-sizing: border-box; display: flex; align-items: center; gap: 14px; padding: 14px 16px; border: 0; border-radius: 12px; background: #0e1217; color: #f2f5f8; text-align: left">
+        <svg aria-hidden="true" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#6fc3ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0"><circle cx="12" cy="12" r="9"></circle><path d="M12 11v5"></path><path d="M12 7.5v.5"></path></svg>
+        <span style="display: flex; flex-direction: column; gap: 6px; min-width: 0">
+          <span style="font-size: 17px; line-height: 24px; font-weight: 500">Гальмівна рідина: заміна через 3 місяці</span>
+          <span style="font-size: 13px; line-height: 16px; font-weight: 500; letter-spacing: 0.08em; color: #a3afbc">ДО ВІДОМА · СЕРВІС BMW · ВЧОРА</span>
+        </span>
+      </button>
+    </div>
+    <button type="button" style="margin-top: auto; height: 56px; box-sizing: border-box; border: 2px solid #647283; border-radius: 12px; background: #05070a; color: #f2f5f8; font-size: 17px; line-height: 24px; font-weight: 500">Запитати Copilot про стан авто</button>
+  </main>
+  <nav aria-label="Розділи" style="height: 72px; flex-shrink: 0; box-sizing: border-box; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid #2c3642">
+    <a href="PhoneTalk.dc.html" style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: #a3afbc; text-decoration: none; font-size: 13px; line-height: 16px; font-weight: 500">
+      <svg aria-hidden="true" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#a3afbc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0"></path><path d="M12 18v3"></path></svg>
+      Голос
+    </a>
+    <a href="PhoneCar.dc.html" style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: #6fc3ff; text-decoration: none; font-size: 13px; line-height: 16px; font-weight: 500">
+      <svg aria-hidden="true" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#6fc3ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"></path></svg>
+      Авто
+    </a>
+    <a href="PhoneSettings.dc.html" style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: #a3afbc; text-decoration: none; font-size: 13px; line-height: 16px; font-weight: 500">
+      <svg aria-hidden="true" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#a3afbc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h8"></path><path d="M18 7h2"></path><path d="M4 17h2"></path><path d="M12 17h8"></path><circle cx="15" cy="7" r="2.5"></circle><circle cx="9" cy="17" r="2.5"></circle></svg>
+      Налаштування
+    </a>
+  </nav>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":412,"height":892}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>
