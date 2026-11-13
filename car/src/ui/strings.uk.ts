@@ -57,6 +57,13 @@ export const PAIRING_LINES: readonly [string, string] = [
   'На сторінці, що відкриється, підтвердьте підключення цього авто.',
 ];
 export const PAIRING_NO_ADDRESS = 'Адресу сервера не налаштовано';
+
+/**
+ * The head unit's clock is so far off that the backend's certificate is not valid at this time (plan 2, Global
+ * Constraints): every request fails. Shown as soon as a request has failed so, on the pairing panel in place of
+ * its instructions and in the assistant tab's answer area, and as the error line of a question that failed so.
+ */
+export const TEXT_CLOCK = 'Годинник головного блока неправильний';
 export const PAIRING_NO_ADDRESS_NOTE = 'Без неї авто не може підключитися до вашого Copilot.';
 
 /** Tile labels (the mockups' order is in view-model.ts). */

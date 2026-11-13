@@ -1357,6 +1357,14 @@ var PowerGate = class {
     }
     return next;
   }
+  /**
+   * The owner used the app (asked a question, opened its screen, or the pairing panel is on screen): restarts the
+   * idle fallback as a fresh reading would. The caller follows it with update(). A car that reports `parked` or
+   * `standby` stays asleep: a known condition decides before the fallback is looked at.
+   */
+  touch() {
+    this.lastActivityAt = this.clock.now();
+  }
   state() {
     return this.current;
   }
@@ -1667,7 +1675,7 @@ function applyCatalogue(s, entries, v, now, state) {
 function severityOf(colour) {
   if (colour === "RED") return "critical";
   if (colour === "YELLOW" || colour === "ORANGE") return "warning";
-  if (colour === "GREEN" || colour === "DEFAULT") return "info";
+  if (colour === "GREEN" || colour === "WHITE") return "info";
   return "warning";
 }
 function rebuildCheckControl(s, state, now) {
@@ -2147,7 +2155,7 @@ function wholeMb(bytes) {
   return typeof bytes === "number" && isFinite(bytes) ? String(Math.round(bytes / MB)) : "?";
 }
 function measure(prev, now, mem, cpu) {
-  if (prev === null || now < prev.at) {
+  if (prev === null || now < prev.at || now - prev.at > 2 * SELF_MEASURE_INTERVAL_MS) {
     const c2 = cpu();
     return { sample: { at: now, user: c2.user, system: c2.system }, line: null };
   }
@@ -2167,6 +2175,11 @@ function measure(prev, now, mem, cpu) {
 var STATE_FILE_NAME = "copilot-state.json";
 var STATE_FILE_MODE = 384;
 var MAX_ENGINE_KEYS = 512;
+var MAX_PENDING_ALERTS = 20;
+var ALERT_KEY_MAX = 256;
+var ALERT_TEXT_MAX = 2e3;
+var SEVERITIES = ["critical", "warning", "info"];
+var PROVENANCES = ["bmw-check-control", "bmw-fault-status", "bmw-service", "owner-configured"];
 var LIMIT_FIELDS = ["oilTempMaxC", "coolantTempMaxC", "battery12vMinPercent", "tyrePressureDeviationBar"];
 function defaultState() {
   return { v: 1, engine: { keys: [] }, limits: __spreadValues({}, NO_LIMITS), popupsEnabled: true, asciiPopups: false, device: null };
@@ -2190,6 +2203,42 @@ function engineFrom(v) {
 function deviceFrom(v) {
   if (!isStruct2(v) || typeof v.id !== "string" || typeof v.secret !== "string" || v.id === "" || v.secret === "") return null;
   return { id: v.id, secret: v.secret };
+}
+function keyString(v) {
+  return typeof v === "string" && v !== "" && v.length <= ALERT_KEY_MAX;
+}
+function timeOrNull(v) {
+  return v === null || typeof v === "number" && isFinite(v);
+}
+function alertFrom(v) {
+  if (!isStruct2(v)) return null;
+  if (!keyString(v.id) || !keyString(v.ruleId) || !keyString(v.dedupKey)) return null;
+  if (typeof v.provenance !== "string" || PROVENANCES.indexOf(v.provenance) < 0) return null;
+  if (typeof v.severity !== "string" || SEVERITIES.indexOf(v.severity) < 0) return null;
+  if (typeof v.title !== "string" || v.title.length > ALERT_TEXT_MAX) return null;
+  if (v.detail !== null && (typeof v.detail !== "string" || v.detail.length > ALERT_TEXT_MAX)) return null;
+  if (typeof v.at !== "number" || !isFinite(v.at) || typeof v.active !== "boolean" || !timeOrNull(v.clearedAt)) return null;
+  return {
+    id: v.id,
+    ruleId: v.ruleId,
+    dedupKey: v.dedupKey,
+    provenance: v.provenance,
+    severity: v.severity,
+    title: v.title,
+    detail: v.detail,
+    at: v.at,
+    active: v.active,
+    clearedAt: v.clearedAt
+  };
+}
+function pendingFrom(v) {
+  if (!Array.isArray(v)) return [];
+  const out = [];
+  for (const item of v.slice(-4 * MAX_PENDING_ALERTS)) {
+    const event = alertFrom(item);
+    if (event !== null) out.push(event);
+  }
+  return out.slice(-MAX_PENDING_ALERTS);
 }
 function booleanOr(v, fallback) {
   return typeof v === "boolean" ? v : fallback;
@@ -2241,9 +2290,14 @@ var StateFile = class {
       device: deviceFrom(raw.device)
     };
     if (raw.paired === true && loaded.device !== null) loaded.paired = true;
+    const pending = pendingFrom(raw.pendingAlerts);
+    if (pending.length > 0) loaded.pendingAlerts = pending;
     return loaded;
   }
-  /** Writes the state to a temporary file (mode 0o600) and renames it into place. Logs a failure, never throws. */
+  /**
+   * Writes the state to a temporary file (mode 0o600) and renames it into place. True when both steps succeeded;
+   * a failure is logged and gives false, never a throw.
+   */
   save(state) {
     let text2;
     try {
@@ -2254,17 +2308,20 @@ var StateFile = class {
         popupsEnabled: state.popupsEnabled,
         asciiPopups: state.asciiPopups,
         device: state.device,
-        paired: state.paired === true
+        paired: state.paired === true,
+        pendingAlerts: Array.isArray(state.pendingAlerts) ? state.pendingAlerts.slice(-MAX_PENDING_ALERTS) : []
       });
     } catch (e) {
       this.warn("state file: state could not be serialised, not saved");
-      return;
+      return false;
     }
     try {
       this.fs.writeFileSync(this.tmpPath, text2, { mode: STATE_FILE_MODE });
       this.fs.renameSync(this.tmpPath, this.path);
+      return true;
     } catch (error) {
       this.warn("state file: save failed (" + codeOf(error) + ")");
+      return false;
     }
   }
   warn(message) {
@@ -2307,6 +2364,7 @@ var PAIRING_LINES = [
   "На сторінці, що відкриється, підтвердьте підключення цього авто."
 ];
 var PAIRING_NO_ADDRESS = "Адресу сервера не налаштовано";
+var TEXT_CLOCK = "Годинник головного блока неправильний";
 var PAIRING_NO_ADDRESS_NOTE = "Без неї авто не може підключитися до вашого Copilot.";
 var TILE = {
   rpm: "ОБЕРТИ ДВИГУНА",
@@ -2649,6 +2707,28 @@ function drawAlerts(p, vm) {
 }
 
 // src/ui/qr-nayuki.ts
+/*! 
+ * QR Code generator library (TypeScript)
+ * 
+ * Copyright (c) Project Nayuki. (MIT License)
+ * https://www.nayuki.io/page/qr-code-generator-library
+ * 
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of
+ * this software and associated documentation files (the "Software"), to deal in
+ * the Software without restriction, including without limitation the rights to
+ * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ * the Software, and to permit persons to whom the Software is furnished to do so,
+ * subject to the following conditions:
+ * - The above copyright notice and this permission notice shall be included in
+ *   all copies or substantial portions of the Software.
+ * - The Software is provided "as is", without warranty of any kind, express or
+ *   implied, including but not limited to the warranties of merchantability,
+ *   fitness for a particular purpose and noninfringement. In no event shall the
+ *   authors or copyright holders be liable for any claim, damages or other
+ *   liability, whether in an action of contract, tort or otherwise, arising from,
+ *   out of or in connection with the Software or the use or other dealings in the
+ *   Software.
+ */
 var qrcodegen;
 ((qrcodegen2) => {
   const _QrCode = class _QrCode {
@@ -3382,7 +3462,8 @@ function encodeQr(text2) {
 // src/ui/draw-pairing.ts
 var QUIET = 4;
 function pairingLines(pairing) {
-  return pairing.url ? PAIRING_LINES.slice() : [PAIRING_NO_ADDRESS, PAIRING_NO_ADDRESS_NOTE];
+  if (!pairing.url) return [PAIRING_NO_ADDRESS, PAIRING_NO_ADDRESS_NOTE];
+  return pairing.note ? [pairing.note] : PAIRING_LINES.slice();
 }
 var cached = null;
 function matrixFor(url) {
@@ -3424,6 +3505,7 @@ function drawPairing(p, pairing, x, y, w, h) {
   const head = wrap(p, first, T.title.size, room, 2);
   lines(p, head, tx, baseline(top, T.title.size, T.title.line), T.title.size, T.title.line, C.ink);
   top += head.length * T.title.line + SPACE.s3;
+  if (second === void 0) return;
   const rest = wrap(p, second, T.answer.size, room, 3);
   lines(p, rest, tx, baseline(top, T.answer.size, T.answer.line), T.answer.size, T.answer.line, C.inkDim);
 }
@@ -3642,22 +3724,23 @@ function buildViewModel(input) {
   const paired = input.link !== "unpaired";
   const network = input.link === "ok";
   const carFresh = snapshot !== null && now - snapshot.takenAt <= CAR_FRESH_MS && anyReading(snapshot);
-  const turn = input.pending || input.error ? null : input.lastTurn;
+  const error = input.error !== null ? input.error : input.clockWrong === true && !input.pending ? TEXT_CLOCK : null;
+  const turn = input.pending || error ? null : input.lastTurn;
   const body = {
     tab: input.tab,
     moving,
-    status: { car: carFresh, network, claude: network && input.error === null },
+    status: { car: carFresh, network, claude: network && error === null },
     assistant: {
       question: turn ? turn.question : null,
       answer: turn ? turn.answer : null,
       pending: input.pending,
-      error: input.error,
+      error,
       chips: (moving ? CHIPS_MOVING : CHIPS_PARKED).slice(),
       strip: strip(snapshot, moving)
     },
     sensors: snapshot ? sensorTiles(snapshot, now) : emptyTiles(),
     alerts: alertRows(input.alerts, now),
-    pairing: { paired, url: paired ? null : input.pairUrl }
+    pairing: { paired, url: paired ? null : input.pairUrl, note: !paired && input.clockWrong === true ? TEXT_CLOCK : null }
   };
   return Object.assign(body, { signature: signatureOf(body) });
 }
@@ -4321,6 +4404,12 @@ var RingBuffer = class {
       this.count++;
     }
   }
+  /** A copy of what the buffer holds, oldest first; the buffer is left as it is. */
+  peek() {
+    const out = [];
+    for (let i = 0; i < this.count; i++) out.push(this.items[(this.head + i) % this.capacity]);
+    return out;
+  }
   size() {
     return this.count;
   }
@@ -4334,6 +4423,7 @@ var DIALOG_POLL_TIMEOUT_MS = 35e3;
 var ASK_TIMEOUT_MS = 7e4;
 var SNAPSHOT_BATCH_MAX_BYTES = 384e3;
 var ALERT_BATCH_MAX_BYTES = 64e3;
+var REFUSAL_LOG_INTERVAL_MS = 6e5;
 function isObject2(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -4341,15 +4431,25 @@ var UplinkClient = class {
   constructor(o) {
     this.snapshots = new RingBuffer(SNAPSHOT_BUFFER_SIZE);
     this.alerts = new RingBuffer(ALERT_QUEUE_MAX);
+    /** The snapshot batch at the front of the buffer was refused once with a 4xx: refused again, it is dropped. */
+    this.snapshotRefused = false;
+    /** A refused snapshot batch was dropped and logged in this waking period. */
+    this.dropLogged = false;
+    /** The failure kinds logged in this waking period. */
+    this.kindsLogged = [];
     this.lastBatchAt = null;
     this.lastAlertAttemptAt = null;
     this.batchInFlight = false;
     this.alertsInFlight = false;
+    /** The alert batch being sent (at most ALERT_QUEUE_MAX), until its send settles: not yet delivered, so in pendingAlerts(). */
+    this.alertBatchInFlight = [];
     /** A raise (sendAlerts) waits in the alert queue: it is not held for the snapshot batch while driving. */
     this.raiseWaiting = false;
     /** Set by 401/403 or another 4xx: nothing is sent with this bearer until the device changes or retry(). */
     this.blocked = null;
     this.lastOutcome = null;
+    /** The refusal last logged (kind and bearer) and when, by the injected clock. */
+    this.refusalLogged = null;
     /** Between close() and reopen(): nothing is sent and every explicit request is refused as offline. */
     this.closed = false;
     this.http = o.http;
@@ -4411,7 +4511,12 @@ var UplinkClient = class {
       this.note(error);
     }
   }
-  ask(text2, style) {
+  /**
+   * One question. With `snapshot` (the car's current readings), that snapshot is first POSTed alone to
+   * /car/v1/snapshots, when open, paired and online; its outcome never stops the question (see the header).
+   */
+  ask(text2, style, snapshot) {
+    if (snapshot !== void 0 && snapshot !== null) this.sendCurrent(snapshot);
     const body = { text: text2, style };
     return this.call(
       "POST",
@@ -4490,6 +4595,20 @@ var UplinkClient = class {
         return "error";
     }
   }
+  /**
+   * A copy of what is not yet delivered, oldest first: an alert send in flight, then the queue, the newest
+   * ALERT_QUEUE_MAX of them (what the queue holds once a failed send is put back at its front). The wiring keeps
+   * it in the state file, so a process end does not lose an unsent clearing, even when the write falls while its
+   * send is in flight and that send then fails. A send that succeeds may leave a delivered event in the file;
+   * sent again by the next process it changes nothing on the backend (an alert's state is set, not toggled).
+   */
+  pendingAlerts() {
+    try {
+      return this.alertBatchInFlight.concat(this.alerts.peek()).slice(-ALERT_QUEUE_MAX);
+    } catch (e) {
+      return [];
+    }
+  }
   /** What is waiting to be sent (both bounded: 240 snapshots, 20 alerts). */
   queued() {
     return { snapshots: this.snapshots.size(), alerts: this.alerts.size() };
@@ -4514,6 +4633,8 @@ var UplinkClient = class {
   /** Opens the client again after close(); the next request opens a new connection. */
   reopen() {
     this.closed = false;
+    this.kindsLogged = [];
+    this.dropLogged = false;
     try {
       this.http.reopen();
     } catch (error) {
@@ -4572,41 +4693,72 @@ var UplinkClient = class {
   sendBatch(bearer, now) {
     const batch = this.takeBatch(this.snapshots, "snapshots", MAX_SNAPSHOTS_PER_BATCH, SNAPSHOT_BATCH_MAX_BYTES);
     if (batch.length === 0) return false;
-    const body = { snapshots: batch };
+    const body = { snapshots: batch, sentAt: now };
     this.batchInFlight = true;
     this.lastBatchAt = now;
-    this.send(bearer, CAR_API_PREFIX + "/snapshots", body).then(
+    this.send(bearer, CAR_API_PREFIX + "/snapshots", body, false).then(
       () => {
         this.batchInFlight = false;
+        this.snapshotRefused = false;
       },
-      () => {
+      (error) => {
         this.batchInFlight = false;
+        if (error instanceof UplinkError && error.kind === "client-error") {
+          if (this.snapshotRefused) {
+            this.snapshotRefused = false;
+            if (!this.dropLogged) {
+              this.dropLogged = true;
+              this.note("dropped " + batch.length + " snapshots the backend refused twice (client-error)");
+            }
+            return;
+          }
+          this.snapshotRefused = true;
+        }
         this.snapshots.pushFront(batch);
       }
     );
     return true;
   }
+  /** The question's snapshot: a copy POSTed alone, outside the buffer and the minute's schedule. Never throws. */
+  sendCurrent(snapshot) {
+    try {
+      if (this.closed) return;
+      const bearer = this.bearer();
+      if (bearer === null || !this.http.online()) return;
+      const copy = JSON.parse(JSON.stringify(snapshot));
+      const body = { snapshots: [copy], sentAt: this.clock.now() };
+      this.send(bearer, CAR_API_PREFIX + "/snapshots", body, false).then(void 0, () => void 0);
+    } catch (error) {
+      this.note(error);
+    }
+  }
   flushAlerts(bearer, now) {
     const batch = this.takeBatch(this.alerts, "alerts", ALERT_QUEUE_MAX, ALERT_BATCH_MAX_BYTES);
     if (batch.length === 0) return;
-    const body = { alerts: batch };
+    const body = { alerts: batch, sentAt: now };
     const withRaise = this.raiseWaiting;
     this.raiseWaiting = this.alerts.size() > 0 && withRaise;
     this.alertsInFlight = true;
+    this.alertBatchInFlight = batch;
     this.lastAlertAttemptAt = now;
-    this.send(bearer, CAR_API_PREFIX + "/alerts", body).then(
+    this.send(bearer, CAR_API_PREFIX + "/alerts", body, true).then(
       () => {
         this.alertsInFlight = false;
+        this.alertBatchInFlight = [];
       },
       () => {
         this.alertsInFlight = false;
+        this.alertBatchInFlight = [];
         this.alerts.pushFront(batch);
         if (withRaise) this.raiseWaiting = true;
       }
     );
   }
-  /** A POST with the given bearer whose outcome is recorded; always settles, rejecting with an UplinkError. */
-  send(bearer, path2, body) {
+  /**
+   * A POST with the given bearer whose outcome is recorded; always settles, rejecting with an UplinkError.
+   * `clientErrorBlocks`: whether a 4xx (other than 401/403) blocks the bearer (alerts) or not (snapshots).
+   */
+  send(bearer, path2, body, clientErrorBlocks) {
     let pending;
     try {
       pending = this.http.request("POST", path2, body, bearer);
@@ -4619,7 +4771,7 @@ var UplinkClient = class {
         return reply;
       },
       (error) => {
-        throw this.failed(error, bearer, true);
+        throw this.failed(error, bearer, path2, clientErrorBlocks);
       }
     );
   }
@@ -4648,30 +4800,48 @@ var UplinkClient = class {
     return pending.then(
       (reply) => {
         const value = shape(reply);
-        if (value === null) throw this.failed(new UplinkError("server-error", "unexpected reply from " + path2.split("?")[0]), used, false);
+        if (value === null) throw this.failed(new UplinkError("server-error", "unexpected reply from " + path2.split("?")[0]), used, path2, false);
         this.lastOutcome = "ok";
         return value;
       },
       (error) => {
         if (cancelled()) throw new UplinkError("offline", "the request was cancelled");
-        throw this.failed(error, used, false);
+        throw this.failed(error, used, path2, false);
       }
     );
   }
   /**
    * Records a failure and returns it as an UplinkError. `unauthorized` blocks this bearer; `client-error`
-   * blocks it only when a background send (snapshots, alerts) got it: that is a lasting mismatch with
-   * the backend, while a 4xx to a question (a validation or budget refusal) concerns that question only.
+   * blocks it only when `clientErrorBlocks` (an alert send got it): that is a lasting mismatch with the
+   * backend, while a 4xx to a question (a validation or budget refusal) concerns that question only and a
+   * refused snapshot batch is dropped after one retry (sendBatch). A failure that does not block is logged
+   * the first time its kind occurs in this waking period, with the path (never the query or the bearer).
    */
-  failed(error, bearer, background) {
+  failed(error, bearer, path2, clientErrorBlocks) {
     const uplinkError = error instanceof UplinkError ? error : new UplinkError("server-error", "unexpected failure");
-    this.lastOutcome = uplinkError.kind;
-    const blocks = uplinkError.kind === "unauthorized" || background && uplinkError.kind === "client-error";
-    if (blocks && (this.blocked === null || this.blocked.bearer !== bearer)) {
-      this.blocked = { kind: uplinkError.kind, bearer };
-      this.note("the backend refused a request (" + uplinkError.kind + "); nothing more is sent until the device changes or retry()");
+    const kind = uplinkError.kind;
+    this.lastOutcome = kind;
+    const blocks = kind === "unauthorized" || clientErrorBlocks && kind === "client-error";
+    if (blocks) {
+      if (this.blocked === null || this.blocked.bearer !== bearer) {
+        this.blocked = { kind, bearer };
+        if (this.refusalDue(kind + " " + bearer)) {
+          this.note("the backend refused a request (" + kind + "); nothing more is sent until the device changes or retry()");
+        }
+      }
+    } else if (kind !== "clock" && this.kindsLogged.indexOf(kind) < 0) {
+      this.kindsLogged.push(kind);
+      this.note(kind + " (" + String(path2).split("?")[0] + ")");
     }
     return uplinkError;
+  }
+  /** Whether this refusal is to be logged: a different one, or the same one REFUSAL_LOG_INTERVAL_MS after the last line. */
+  refusalDue(key) {
+    const now = this.clock.now();
+    const last = this.refusalLogged;
+    if (last !== null && last.key === key && now >= last.at && now - last.at < REFUSAL_LOG_INTERVAL_MS) return false;
+    this.refusalLogged = { key, at: now };
+    return true;
   }
   note(problem) {
     try {
@@ -4687,18 +4857,24 @@ var SNAPSHOT_EVERY_MS = 6e4;
 var POLL_RETRY_MS = 5e3;
 var PAIRING_RETRY_MS = 3e4;
 var CONFIG_RETRY_MS = 6e4;
+var RETRY_MAX_MS = 6e5;
+var ALERT_SAVE_GAP_MS = 6e4;
 var LISTED_MAX = 20;
 var DEVICE_ID_BYTES = 12;
 var DEVICE_SECRET_BYTES = 32;
 var TEST_POPUP_SETTING = "testPopup";
 var TEST_POPUP_ID = "copilot-test-popup";
 var TEXT_NO_SERVER = "Немає зв'язку з сервером";
-var TEXT_CLOCK = "Годинник головного блока неправильний";
 var TEXT_REFUSED = "Сервер відхилив запит";
+function backoff(first, failures) {
+  let wait = first;
+  for (let i = 1; i < failures && wait < RETRY_MAX_MS; i++) wait *= 2;
+  return Math.min(wait, RETRY_MAX_MS);
+}
 function errorLine(error) {
   const kind = error instanceof UplinkError ? error.kind : null;
   if (kind === "clock") return TEXT_CLOCK;
-  if (kind === "unauthorized" || kind === "client-error") return TEXT_REFUSED;
+  if (kind === "unauthorized" || kind === "client-error" || kind === "server-error") return TEXT_REFUSED;
   return TEXT_NO_SERVER;
 }
 var SNAPSHOT_KEYS = Object.keys(emptySnapshot(0)).filter((k) => k !== "takenAt");
@@ -4716,8 +4892,26 @@ var NO_DISK = {
   writeFileSync: () => void 0,
   renameSync: () => void 0
 };
-function isTurn(v) {
-  return typeof v === "object" && v !== null && typeof v.id === "string";
+var TURN_TEXT_MAX = 2e3;
+var TURN_ID_MAX = 128;
+function cutText(text2) {
+  return text2.length > TURN_TEXT_MAX ? text2.slice(0, TURN_TEXT_MAX) : text2;
+}
+function turnFrom(v) {
+  if (typeof v !== "object" || v === null) return null;
+  const t = v;
+  if (typeof t.id !== "string" || t.id === "" || t.id.length > TURN_ID_MAX) return null;
+  if (typeof t.question !== "string" || typeof t.answer !== "string") return null;
+  return {
+    id: t.id,
+    at: typeof t.at === "number" && isFinite(t.at) ? t.at : 0,
+    question: cutText(t.question),
+    answer: cutText(t.answer),
+    style: t.style === "spoken" ? "spoken" : "full",
+    source: t.source === "panel" || t.source === "voice" ? t.source : "car",
+    model: typeof t.model === "string" ? t.model.slice(0, TURN_ID_MAX) : "",
+    snapshotAt: typeof t.snapshotAt === "number" && isFinite(t.snapshotAt) ? t.snapshotAt : null
+  };
 }
 function uploads(event) {
   if (event.severity === "critical" || event.severity === "warning") return true;
@@ -4749,6 +4943,9 @@ function startApp(deps) {
   const stateFile = new StateFile({ dir: dataDir || "", fs: dataDir ? fs2 : NO_DISK, log });
   const state = stateFile.load();
   state.paired = state.paired === true;
+  const restoredAlerts = Array.isArray(state.pendingAlerts) ? state.pendingAlerts : [];
+  state.pendingAlerts = void 0;
+  let pendingAlerts = () => restoredAlerts;
   const latin = setting("latinPopups");
   if (typeof latin === "boolean") state.asciiPopups = latin;
   const engine = new EventEngine(defaultEngineOptions());
@@ -4763,12 +4960,19 @@ function startApp(deps) {
     return JSON.stringify(state);
   };
   const save = () => {
+    let current;
     try {
-      lastSaved = snapshotOfState();
+      current = snapshotOfState();
     } catch (e) {
-      lastSaved = "";
+      current = "";
     }
-    stateFile.save(state);
+    let pending;
+    try {
+      pending = pendingAlerts();
+    } catch (e) {
+      pending = [];
+    }
+    lastSaved = stateFile.save(Object.assign({}, state, { pendingAlerts: pending })) ? current : "";
   };
   const saveIfChanged = () => {
     let current;
@@ -4807,6 +5011,11 @@ function startApp(deps) {
     missingKeys: stringList(deps.config.droppedReadings, (k) => SNAPSHOT_KEYS.indexOf(k) >= 0)
   });
   const gate = new PowerGate({ clock: clock2 });
+  const noteUse = safe(log, "power gate", () => {
+    if (stopped) return;
+    gate.touch();
+    gate.update(provider.snapshot());
+  });
   let listed = [];
   const list = (event) => {
     for (let i = 0; i < listed.length; i++) {
@@ -4836,6 +5045,17 @@ function startApp(deps) {
     ascii: () => state.asciiPopups === true
   });
   let answered = false;
+  let clockWrong = false;
+  let clockLogged = false;
+  let onAnswered = () => void 0;
+  const answeredStep = safe(log, "answered", () => onAnswered());
+  const noteClock = safe(log, "clock", (wrong) => {
+    clockWrong = wrong;
+    if (wrong && !clockLogged) {
+      clockLogged = true;
+      log.warn("uplink: the head unit's clock is wrong (the server's certificate is not valid at this time); every request fails until it is set right");
+    }
+  });
   const http = deps.http || (backendUrl ? new HttpsClient({ baseUrl: backendUrl, lease: () => readLease(dataDir || "", dataDir ? fs2 : NO_DISK), log, timers: timers2, clock: clock2 }) : null);
   const noteAnswer = safe(log, "pairing", (authorised) => {
     if (authorised) {
@@ -4856,17 +5076,39 @@ function startApp(deps) {
     http.request = function watched(method, path2, body, bearer, options) {
       return request(method, path2, body, bearer, options).then(
         (value) => {
+          noteClock(false);
           noteAnswer(true);
+          answeredStep();
           return value;
         },
         (error2) => {
-          if (error2 instanceof UplinkError && error2.kind === "unauthorized") noteAnswer(false);
+          if (error2 instanceof UplinkError && error2.kind === "clock") noteClock(true);
+          if (error2 instanceof UplinkError && error2.kind === "unauthorized") {
+            noteClock(false);
+            noteAnswer(false);
+          }
           throw error2;
         }
       );
     };
   }
   const uplink = http ? new UplinkClient({ http, device: () => state.device, clock: clock2, log }) : null;
+  if (uplink) {
+    uplink.queueAlerts(restoredAlerts);
+    pendingAlerts = () => uplink.pendingAlerts();
+  }
+  let alertSaveDue = false;
+  let alertSavedAt = null;
+  const saveAlertMemory = (now) => {
+    const at = clock2.now();
+    if (!now && alertSavedAt !== null && at >= alertSavedAt && at - alertSavedAt < ALERT_SAVE_GAP_MS) {
+      alertSaveDue = true;
+      return;
+    }
+    alertSaveDue = false;
+    alertSavedAt = at;
+    saveIfChanged();
+  };
   const runner = new RuleRunner({
     provider,
     engine,
@@ -4875,16 +5117,20 @@ function startApp(deps) {
     onEvents: (events) => {
       const upload = [];
       let raised = false;
+      let cleared = false;
       for (const event of events) {
         list(event);
         presenter.present(event);
         if (!uploads(event)) continue;
         upload.push(event);
         if (event.active && !isReopened(event)) raised = true;
+        if (!event.active) cleared = true;
       }
-      if (!uplink || upload.length === 0) return;
-      if (raised) uplink.sendAlerts(upload);
-      else uplink.queueAlerts(upload);
+      if (uplink && upload.length > 0) {
+        if (raised) uplink.sendAlerts(upload);
+        else uplink.queueAlerts(upload);
+      }
+      if (raised || cleared) saveAlertMemory(raised);
     }
   });
   let lastTurn = null;
@@ -4904,7 +5150,8 @@ function startApp(deps) {
     pending: asking,
     error,
     link: linkStatus(),
-    pairUrl: pairingUrl(backendUrl, state.device)
+    pairUrl: pairingUrl(backendUrl, state.device),
+    clockWrong
   });
   const screenVisible = () => {
     try {
@@ -4915,16 +5162,24 @@ function startApp(deps) {
   };
   const ask = (question, moving) => {
     if (asking || stopped) return;
+    noteUse();
     if (!uplink) {
       error = TEXT_NO_SERVER;
       return;
     }
     asking = true;
     error = null;
-    uplink.ask(question, moving ? "spoken" : "full").then(
-      safe(log, "ask", (turn) => {
+    let current;
+    try {
+      current = gate.state() === "driving" ? void 0 : provider.snapshot();
+    } catch (e) {
+      current = void 0;
+    }
+    uplink.ask(question, moving ? "spoken" : "full", current).then(
+      safe(log, "ask", (reply) => {
         asking = false;
-        if (isTurn(turn)) {
+        const turn = turnFrom(reply);
+        if (turn !== null) {
           lastTurn = turn;
           lastTurnId = turn.id;
         }
@@ -4944,19 +5199,30 @@ function startApp(deps) {
   let polling = false;
   let pollGen = 0;
   let pollWait = null;
+  let pollFailures = 0;
+  let pollRefusals = 0;
   let pollCancel = null;
   const pollAllowed = () => !!uplink && !stopped && gate.state() !== "asleep" && screenVisible();
   const takeTurns = (turns) => {
-    if (!Array.isArray(turns) || turns.length === 0) return;
-    const last = turns[turns.length - 1];
-    if (!isTurn(last)) return;
+    if (!Array.isArray(turns) || turns.length === 0) return true;
+    const last = turnFrom(turns[turns.length - 1]);
+    if (last === null) return false;
     lastTurn = last;
     lastTurnId = last.id;
     if (!asking) error = null;
+    return true;
   };
-  const waitThenPoll = () => {
+  const waitThenPoll = (ms) => {
     if (!pollAllowed() || pollWait !== null) return;
-    pollWait = timers2.setTimeout(afterWait, POLL_RETRY_MS);
+    pollWait = timers2.setTimeout(afterWait, ms);
+  };
+  const pollNow = () => {
+    if (polling) return;
+    if (pollWait !== null) {
+      timers2.clearTimeout(pollWait);
+      pollWait = null;
+    }
+    pumpPoll();
   };
   const pumpPoll = () => {
     if (!uplink || !pollAllowed() || polling || pollWait !== null) return;
@@ -4971,17 +5237,29 @@ function startApp(deps) {
         if (gen !== pollGen) return;
         polling = false;
         pollCancel = null;
-        takeTurns(turns);
+        pollFailures = 0;
+        if (!takeTurns(turns)) {
+          if (pollRefusals === 0) log.warn("dialog poll: the newest turn from the backend was refused (wrong shape)");
+          if (pollRefusals < 64) pollRefusals++;
+          waitThenPoll(backoff(POLL_RETRY_MS, pollRefusals));
+          return;
+        }
+        pollRefusals = 0;
         const now = clock2.now();
         const quick = (!Array.isArray(turns) || turns.length === 0) && now >= issuedAt && now - issuedAt < POLL_RETRY_MS;
-        if (quick) waitThenPoll();
+        if (quick) waitThenPoll(POLL_RETRY_MS);
         else pumpPoll();
       }),
-      safe(log, "dialog poll", () => {
+      safe(log, "dialog poll", (failure) => {
         if (gen !== pollGen) return;
         polling = false;
         pollCancel = null;
-        waitThenPoll();
+        if (failure instanceof UplinkError && failure.kind === "offline") {
+          waitThenPoll(POLL_RETRY_MS);
+          return;
+        }
+        if (pollFailures < 64) pollFailures++;
+        waitThenPoll(backoff(POLL_RETRY_MS, pollFailures));
       })
     );
   };
@@ -5003,6 +5281,17 @@ function startApp(deps) {
   let configWanted = true;
   let configBusy = false;
   let configTriedAt = null;
+  let configFailures = 0;
+  onAnswered = () => {
+    if (pollFailures > 0) {
+      pollFailures = 0;
+      if (pollWait !== null) pollNow();
+    }
+    if (configWanted && !configBusy && configFailures > 0) {
+      configFailures = 0;
+      configTriedAt = null;
+    }
+  };
   const applyConfig = (config) => {
     const limits = config.ownerLimits;
     const popups = config.popupsEnabled === true;
@@ -5019,7 +5308,7 @@ function startApp(deps) {
   const maybeFetchConfig = safe(log, "config", () => {
     if (!uplink || !http || !configWanted || configBusy || stopped || gate.state() === "asleep") return;
     const now = clock2.now();
-    if (configTriedAt !== null && now >= configTriedAt && now - configTriedAt < CONFIG_RETRY_MS) return;
+    if (configTriedAt !== null && now >= configTriedAt && now - configTriedAt < backoff(CONFIG_RETRY_MS, configFailures)) return;
     if (!http.online()) return;
     configBusy = true;
     configTriedAt = now;
@@ -5027,10 +5316,12 @@ function startApp(deps) {
       safe(log, "config", (config) => {
         configBusy = false;
         configWanted = false;
+        configFailures = 0;
         applyConfig(config);
       }),
       safe(log, "config", () => {
         configBusy = false;
+        if (configFailures < 64) configFailures++;
       })
     );
   });
@@ -5053,8 +5344,14 @@ function startApp(deps) {
     maybeFetchConfig();
     if (!state.paired && screenVisible() && (lastRetryAt === null || now < lastRetryAt || now - lastRetryAt >= PAIRING_RETRY_MS)) {
       lastRetryAt = now;
+      const refused = uplink.status() === "unpaired";
       uplink.retry();
+      if (refused) pollFailures = 0;
+      pollNow();
     }
+  });
+  const stepAlertSave = safe(log, "state file", () => {
+    if (alertSaveDue) saveAlertMemory(false);
   });
   const stepMeasure = safe(log, "self-measure", () => {
     const r = measure(sample, clock2.now(), () => process.memoryUsage(), () => process.cpuUsage());
@@ -5064,9 +5361,11 @@ function startApp(deps) {
   const tick = safe(log, "tick", () => {
     if (stopped) return;
     stepRules();
+    if (!state.paired && screenVisible()) gate.touch();
     stepGate();
     if (gate.state() === "asleep" || stopped) return;
     stepUplink();
+    stepAlertSave();
     stepMeasure();
   });
   const startTick = () => {
@@ -5085,7 +5384,8 @@ function startApp(deps) {
     if (uplink) uplink.close();
     answered = false;
     provider.suspend();
-    save();
+    alertSaveDue = false;
+    saveIfChanged();
   };
   const wakeUp = () => {
     provider.resume();
@@ -5095,6 +5395,12 @@ function startApp(deps) {
     }
     configWanted = true;
     configTriedAt = null;
+    configFailures = 0;
+    pollFailures = 0;
+    pollRefusals = 0;
+    clockWrong = false;
+    clockLogged = false;
+    sample = null;
     lastRetryAt = clock2.now();
     startTick();
     maybeFetchConfig();
@@ -5110,6 +5416,8 @@ function startApp(deps) {
   });
   ctx.ui.onVisible(safe(log, "visible", (name, on) => {
     if (name !== SCREEN || stopped) return;
+    if (on) noteUse();
+    if (gate.state() === "asleep") log.info("screen: " + (on ? "shown" : "hidden") + " while asleep");
     if (on) pumpPoll();
     else stopPoll();
   }));

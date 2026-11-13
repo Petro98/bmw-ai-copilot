@@ -57,6 +57,8 @@ export interface ScreenInput {
   error: string | null;
   link: LinkStatus;
   pairUrl: string | null;
+  /** The last request failed because the head unit's clock is wrong (view-model.ts shows «Годинник…»). */
+  clockWrong?: boolean;
 }
 
 /** The parts of the kit's ctx the screen uses (the preview's stubbed ctx has them too). */

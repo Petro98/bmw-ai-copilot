@@ -10,10 +10,23 @@
  * once per interval. A raise that could not go out at once (offline, a send in flight, a failed send) is not
  * held for the batch: onTick() sends it as before, on the first online tick at most once per interval.
  *
- * A 401/403 (and a 4xx to a background send) blocks the device's bearer. The block ends when the device
+ * A 401/403 (and a 4xx to an alert send) blocks the device's bearer. The block ends when the device
  * changes or when the wiring calls retry(): the car makes up its own id and secret before the owner has
  * registered them on the pairing page, so its first requests are refused, and registering changes
- * nothing the client could see.
+ * nothing the client could see. A snapshot batch refused with another 4xx blocks nothing (alerts keep
+ * flowing): it is sent once more at the next interval and, refused again, dropped (logged once per waking).
+ *
+ * Every batch carries `sentAt`, the car's clock when that request is sent (stamped again on a resend), so the
+ * backend can measure a head-unit clock that is off (packages/shared/src/car-dto.ts).
+ *
+ * A question may carry the car's current snapshot (ask's third argument, given when the car is not driving and
+ * so not uploading once a minute): it is POSTed alone to /car/v1/snapshots just before the question, on the same
+ * keep-alive connection (HttpsClient: one socket for every request but the dialog poll), so the backend answers
+ * from it. It bypasses the snapshot buffer and the minute's schedule; its failure never stops the question.
+ *
+ * The first failure of each kind (offline, dns, timeout, tls, server-error, client-error) is logged once per
+ * waking period (reset by reopen()) with the request's path, so the owner's log tells them apart; refusals that
+ * block have their own line, and a wrong clock is logged in its own words by the wiring (car/src/app.ts).
  */
 import type { Clock, VehicleSnapshot } from '@copilot/vehicle-core';
 import type { AlertEvent } from '@copilot/event-engine';
@@ -49,6 +62,11 @@ export const ASK_TIMEOUT_MS = 70_000;
 export const SNAPSHOT_BATCH_MAX_BYTES = 384_000;
 /** The same for an alert batch. */
 export const ALERT_BATCH_MAX_BYTES = 64_000;
+/**
+ * A refusal that comes back after each retry() (the pairing panel lifts the block every 30 s) is logged the first
+ * time and then at most this often, so the log file is not appended to twice a minute while the panel shows.
+ */
+export const REFUSAL_LOG_INTERVAL_MS = 600_000;
 
 export interface UplinkClientOptions {
   http: HttpsClient;
@@ -72,15 +90,25 @@ export class UplinkClient {
   private readonly sendIntervalMs: number;
   private readonly snapshots = new RingBuffer<VehicleSnapshot>(SNAPSHOT_BUFFER_SIZE);
   private readonly alerts = new RingBuffer<AlertEvent>(ALERT_QUEUE_MAX);
+  /** The snapshot batch at the front of the buffer was refused once with a 4xx: refused again, it is dropped. */
+  private snapshotRefused = false;
+  /** A refused snapshot batch was dropped and logged in this waking period. */
+  private dropLogged = false;
+  /** The failure kinds logged in this waking period. */
+  private kindsLogged: string[] = [];
   private lastBatchAt: number | null = null;
   private lastAlertAttemptAt: number | null = null;
   private batchInFlight = false;
   private alertsInFlight = false;
+  /** The alert batch being sent (at most ALERT_QUEUE_MAX), until its send settles: not yet delivered, so in pendingAlerts(). */
+  private alertBatchInFlight: AlertEvent[] = [];
   /** A raise (sendAlerts) waits in the alert queue: it is not held for the snapshot batch while driving. */
   private raiseWaiting = false;
   /** Set by 401/403 or another 4xx: nothing is sent with this bearer until the device changes or retry(). */
   private blocked: { kind: 'unauthorized' | 'client-error'; bearer: string } | null = null;
   private lastOutcome: Outcome | null = null;
+  /** The refusal last logged (kind and bearer) and when, by the injected clock. */
+  private refusalLogged: { key: string; at: number } | null = null;
   /** Between close() and reopen(): nothing is sent and every explicit request is refused as offline. */
   private closed = false;
 
@@ -154,7 +182,12 @@ export class UplinkClient {
     }
   }
 
-  ask(text: string, style: AskStyle): Promise<DialogTurn> {
+  /**
+   * One question. With `snapshot` (the car's current readings), that snapshot is first POSTed alone to
+   * /car/v1/snapshots, when open, paired and online; its outcome never stops the question (see the header).
+   */
+  ask(text: string, style: AskStyle, snapshot?: VehicleSnapshot): Promise<DialogTurn> {
+    if (snapshot !== undefined && snapshot !== null) this.sendCurrent(snapshot);
     const body: CarAskRequest = { text, style };
     return this.call<DialogTurn>('POST', CAR_API_PREFIX + '/ask', body, { timeoutMs: ASK_TIMEOUT_MS }, (reply) =>
       isObject(reply) && isObject(reply.turn) ? (reply.turn as unknown as DialogTurn) : null,
@@ -225,6 +258,21 @@ export class UplinkClient {
     }
   }
 
+  /**
+   * A copy of what is not yet delivered, oldest first: an alert send in flight, then the queue, the newest
+   * ALERT_QUEUE_MAX of them (what the queue holds once a failed send is put back at its front). The wiring keeps
+   * it in the state file, so a process end does not lose an unsent clearing, even when the write falls while its
+   * send is in flight and that send then fails. A send that succeeds may leave a delivered event in the file;
+   * sent again by the next process it changes nothing on the backend (an alert's state is set, not toggled).
+   */
+  pendingAlerts(): AlertEvent[] {
+    try {
+      return this.alertBatchInFlight.concat(this.alerts.peek()).slice(-ALERT_QUEUE_MAX);
+    } catch {
+      return [];
+    }
+  }
+
   /** What is waiting to be sent (both bounded: 240 snapshots, 20 alerts). */
   queued(): { snapshots: number; alerts: number } {
     return { snapshots: this.snapshots.size(), alerts: this.alerts.size() };
@@ -252,6 +300,8 @@ export class UplinkClient {
   /** Opens the client again after close(); the next request opens a new connection. */
   reopen(): void {
     this.closed = false;
+    this.kindsLogged = [];
+    this.dropLogged = false;
     try {
       this.http.reopen();
     } catch (error) {
@@ -314,45 +364,78 @@ export class UplinkClient {
   private sendBatch(bearer: string, now: number): boolean {
     const batch = this.takeBatch(this.snapshots, 'snapshots', MAX_SNAPSHOTS_PER_BATCH, SNAPSHOT_BATCH_MAX_BYTES);
     if (batch.length === 0) return false;
-    const body: CarSnapshotBatch = { snapshots: batch };
+    const body: CarSnapshotBatch = { snapshots: batch, sentAt: now };
     this.batchInFlight = true;
     this.lastBatchAt = now;
-    this.send(bearer, CAR_API_PREFIX + '/snapshots', body).then(
+    this.send(bearer, CAR_API_PREFIX + '/snapshots', body, false).then(
       () => {
         this.batchInFlight = false;
+        this.snapshotRefused = false;
       },
-      () => {
+      (error: unknown) => {
         this.batchInFlight = false;
+        // refused as malformed a second time: it would be refused for ever, so it is dropped (newer ones go on)
+        if (error instanceof UplinkError && error.kind === 'client-error') {
+          if (this.snapshotRefused) {
+            this.snapshotRefused = false;
+            if (!this.dropLogged) {
+              this.dropLogged = true;
+              this.note('dropped ' + batch.length + ' snapshots the backend refused twice (client-error)');
+            }
+            return;
+          }
+          this.snapshotRefused = true;
+        }
         this.snapshots.pushFront(batch);
       },
     );
     return true;
   }
 
+  /** The question's snapshot: a copy POSTed alone, outside the buffer and the minute's schedule. Never throws. */
+  private sendCurrent(snapshot: VehicleSnapshot): void {
+    try {
+      if (this.closed) return;
+      const bearer = this.bearer();
+      if (bearer === null || !this.http.online()) return;
+      const copy = JSON.parse(JSON.stringify(snapshot)) as VehicleSnapshot;
+      const body: CarSnapshotBatch = { snapshots: [copy], sentAt: this.clock.now() };
+      this.send(bearer, CAR_API_PREFIX + '/snapshots', body, false).then(undefined, () => undefined);
+    } catch (error) {
+      this.note(error);
+    }
+  }
+
   private flushAlerts(bearer: string, now: number): void {
     const batch = this.takeBatch(this.alerts, 'alerts', ALERT_QUEUE_MAX, ALERT_BATCH_MAX_BYTES);
     if (batch.length === 0) return;
-    const body: CarAlertBatch = { alerts: batch };
+    const body: CarAlertBatch = { alerts: batch, sentAt: now };
     // the queue goes oldest first, within the byte limit; a raise waiting in it is the newest, so it is
     // delivered once the queue is empty, and waits again if this send fails or leaves alerts behind
     const withRaise = this.raiseWaiting;
     this.raiseWaiting = this.alerts.size() > 0 && withRaise;
     this.alertsInFlight = true;
+    this.alertBatchInFlight = batch;
     this.lastAlertAttemptAt = now;
-    this.send(bearer, CAR_API_PREFIX + '/alerts', body).then(
+    this.send(bearer, CAR_API_PREFIX + '/alerts', body, true).then(
       () => {
         this.alertsInFlight = false;
+        this.alertBatchInFlight = [];
       },
       () => {
         this.alertsInFlight = false;
+        this.alertBatchInFlight = [];
         this.alerts.pushFront(batch);
         if (withRaise) this.raiseWaiting = true;
       },
     );
   }
 
-  /** A POST with the given bearer whose outcome is recorded; always settles, rejecting with an UplinkError. */
-  private send(bearer: string, path: string, body: unknown): Promise<unknown> {
+  /**
+   * A POST with the given bearer whose outcome is recorded; always settles, rejecting with an UplinkError.
+   * `clientErrorBlocks`: whether a 4xx (other than 401/403) blocks the bearer (alerts) or not (snapshots).
+   */
+  private send(bearer: string, path: string, body: unknown, clientErrorBlocks: boolean): Promise<unknown> {
     let pending: Promise<unknown>;
     try {
       pending = this.http.request<unknown>('POST', path, body, bearer);
@@ -365,7 +448,7 @@ export class UplinkClient {
         return reply;
       },
       (error: unknown) => {
-        throw this.failed(error, bearer, true);
+        throw this.failed(error, bearer, path, clientErrorBlocks);
       },
     );
   }
@@ -402,32 +485,52 @@ export class UplinkClient {
     return pending.then(
       (reply) => {
         const value = shape(reply);
-        if (value === null) throw this.failed(new UplinkError('server-error', 'unexpected reply from ' + path.split('?')[0]), used, false);
+        if (value === null) throw this.failed(new UplinkError('server-error', 'unexpected reply from ' + path.split('?')[0]), used, path, false);
         this.lastOutcome = 'ok';
         return value;
       },
       (error: unknown) => {
         // ended by its caller: not an outcome of the link, so nothing is recorded or blocked
         if (cancelled()) throw new UplinkError('offline', 'the request was cancelled');
-        throw this.failed(error, used, false);
+        throw this.failed(error, used, path, false);
       },
     );
   }
 
   /**
    * Records a failure and returns it as an UplinkError. `unauthorized` blocks this bearer; `client-error`
-   * blocks it only when a background send (snapshots, alerts) got it: that is a lasting mismatch with
-   * the backend, while a 4xx to a question (a validation or budget refusal) concerns that question only.
+   * blocks it only when `clientErrorBlocks` (an alert send got it): that is a lasting mismatch with the
+   * backend, while a 4xx to a question (a validation or budget refusal) concerns that question only and a
+   * refused snapshot batch is dropped after one retry (sendBatch). A failure that does not block is logged
+   * the first time its kind occurs in this waking period, with the path (never the query or the bearer).
    */
-  private failed(error: unknown, bearer: string, background: boolean): UplinkError {
+  private failed(error: unknown, bearer: string, path: string, clientErrorBlocks: boolean): UplinkError {
     const uplinkError = error instanceof UplinkError ? error : new UplinkError('server-error', 'unexpected failure');
-    this.lastOutcome = uplinkError.kind;
-    const blocks = uplinkError.kind === 'unauthorized' || (background && uplinkError.kind === 'client-error');
-    if (blocks && (this.blocked === null || this.blocked.bearer !== bearer)) {
-      this.blocked = { kind: uplinkError.kind, bearer };
-      this.note('the backend refused a request (' + uplinkError.kind + '); nothing more is sent until the device changes or retry()');
+    const kind = uplinkError.kind;
+    this.lastOutcome = kind;
+    const blocks = kind === 'unauthorized' || (clientErrorBlocks && kind === 'client-error');
+    if (blocks) {
+      if (this.blocked === null || this.blocked.bearer !== bearer) {
+        this.blocked = { kind: kind as 'unauthorized' | 'client-error', bearer };
+        if (this.refusalDue(kind + ' ' + bearer)) {
+          this.note('the backend refused a request (' + kind + '); nothing more is sent until the device changes or retry()');
+        }
+      }
+    } else if (kind !== 'clock' && this.kindsLogged.indexOf(kind) < 0) {
+      // (a wrong clock has its own line, once per waking period, in the wiring: app.ts noteClock)
+      this.kindsLogged.push(kind);
+      this.note(kind + ' (' + String(path).split('?')[0] + ')');
     }
     return uplinkError;
+  }
+
+  /** Whether this refusal is to be logged: a different one, or the same one REFUSAL_LOG_INTERVAL_MS after the last line. */
+  private refusalDue(key: string): boolean {
+    const now = this.clock.now();
+    const last = this.refusalLogged;
+    if (last !== null && last.key === key && now >= last.at && now - last.at < REFUSAL_LOG_INTERVAL_MS) return false;
+    this.refusalLogged = { key, at: now };
+    return true;
   }
 
   private note(problem: unknown): void {

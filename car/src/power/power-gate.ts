@@ -10,7 +10,9 @@ import {
 
 /**
  * What the rest of the app may do (wired in Task 9):
- * - `asleep`  → no timer at all, no network, connections closed, state file written once;
+ * - `asleep`  → none of the app's timers, no network, connections closed, state file written at most once (the kit's
+ *               screen loop and renderer keep-alive follow the screen's visibility, not this gate: they run for as
+ *               long as the head unit reports the app's screen shown);
  * - `awake`   → 1 Hz tick, network only for an alert or a question;
  * - `driving` → 1 Hz tick and the once-a-minute snapshot upload.
  */
@@ -50,7 +52,7 @@ export class PowerGate {
   private listeners: Listener[] = [];
   /** The last `at` seen per passive reading path; a fixed set of keys, so bounded. */
   private lastAt: Record<string, number> = {};
-  /** Clock time at which a passive reading's `at` last changed (or the gate was created). */
+  /** Clock time at which a passive reading's `at` last changed, touch() was called, or the gate was created. */
   private lastActivityAt: number;
 
   constructor(options: { clock: Clock; idleFallbackMs?: number }) {
@@ -74,6 +76,15 @@ export class PowerGate {
       for (let i = 0; i < listeners.length; i++) listeners[i](next, previous);
     }
     return next;
+  }
+
+  /**
+   * The owner used the app (asked a question, opened its screen, or the pairing panel is on screen): restarts the
+   * idle fallback as a fresh reading would. The caller follows it with update(). A car that reports `parked` or
+   * `standby` stays asleep: a known condition decides before the fallback is looked at.
+   */
+  touch(): void {
+    this.lastActivityAt = this.clock.now();
   }
 
   state(): PowerState {

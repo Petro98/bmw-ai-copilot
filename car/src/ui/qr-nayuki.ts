@@ -1,9 +1,10 @@
 // Vendored for the head unit (car/kit/VENDORED.md, "QR code generator"): Project Nayuki's QR Code generator
 // library, typescript-javascript/qrcodegen.ts at commit 8329a7108fc22be3e1eec0a9f9318978579e3621 of
 // https://github.com/nayuki/QR-Code-generator (MIT, notice below), unchanged except for these comment lines,
-// the lint switch-off on the next line and the `export { qrcodegen };` at the end.
+// the lint switch-off on the next line, the `!` that opens the notice (a legal comment, which esbuild keeps in
+// the bundle: car/scripts/build-car.mjs legalComments) and the `export { qrcodegen };` at the end.
 /* eslint-disable */
-/* 
+/*! 
  * QR Code generator library (TypeScript)
  * 
  * Copyright (c) Project Nayuki. (MIT License)

@@ -354,11 +354,19 @@ function applyCatalogue(s: VehicleSnapshot, entries: SignalEntry[], v: unknown, 
 
 /* ---------- Check Control ---------- */
 
-/** Severity from the cluster's colour. The colour set is undocumented (telemetry.md F13); the names are those of the CBS colour enum (A:apps/service/main.js:81). */
+/**
+ * Severity from the cluster's colour (cCColor). The colour set is undocumented (telemetry.md F13); the names are
+ * the reference's own Check Control colour table (A:apps/dtc_scanner/main.js:423 `COL = { RED: crit, YELLOW: warn,
+ * ORANGE: warn, GREEN: GO, WHITE: text }`): RED → critical, YELLOW / ORANGE → warning, GREEN and WHITE (drawn
+ * there as neutral, not as a warning) → info. Anything else is not in that table, and neither are wire numbers
+ * for cCColor (the kit says enums may arrive as numbers, A:kit/runtime/car.js:30, but no reference gives this
+ * enum's numbers; DEFAULT is a CBS colour, A:apps/service/main.js:81, not a Check Control one): the safest
+ * meaning, warning (shown and popped up), is used for them.
+ */
 function severityOf(colour: unknown): Severity {
   if (colour === 'RED') return 'critical';
   if (colour === 'YELLOW' || colour === 'ORANGE') return 'warning';
-  if (colour === 'GREEN' || colour === 'DEFAULT') return 'info';
+  if (colour === 'GREEN' || colour === 'WHITE') return 'info';
   return 'warning';
 }
 
@@ -432,7 +440,14 @@ function applyCheckControlTexts(s: VehicleSnapshot, v: unknown, now: number, sta
 
 /* ---------- service list (CBS) ---------- */
 
-/** cBSColor: RED 1 → overdue, YELLOW 2 / ORANGE 4 → due soon, GREEN 3 → ok (A:apps/service/main.js:81, telemetry.md F6). */
+/**
+ * cBSColor, the CBS colour enum `{ DEFAULT: 0, RED: 1, YELLOW: 2, GREEN: 3, ORANGE: 4 }` (A:apps/service/main.js:81,
+ * telemetry.md F6), read as the reference labels it (A:apps/service/main.js:51 `STATUS = ['', 'Due now',
+ * 'Due soon', 'OK', 'Due soon']`, :565): YELLOW 2 / ORANGE 4 → due soon, GREEN 3 → ok. RED 1 is "Due now" there,
+ * not "overdue" (the reference computes overdue separately, from the due date, :73); ServiceStatus
+ * (packages/vehicle-core) has no "due now", so RED maps to its most urgent value, 'overdue', the safest of the
+ * statuses it has. DEFAULT 0 and anything else → unknown.
+ */
 function serviceStatusOf(colour: unknown): ServiceStatus {
   if (colour === 'RED' || colour === 1) return 'overdue';
   if (colour === 'YELLOW' || colour === 'ORANGE' || colour === 2 || colour === 4) return 'due-soon';

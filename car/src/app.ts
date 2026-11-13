@@ -7,12 +7,31 @@
  *   - awake or driving: exactly one 1000 ms interval. Each tick refreshes the provider and runs the rules
  *     (RuleRunner.tick), updates the power gate, keeps a snapshot for the uplink once a minute, lets the uplink
  *     send what is due, and self-measures (a line at most every ten minutes).
- *   - asleep: no timer at all. The tick stops, the pop-up presenter closes everything, the dialog poll ends, the
- *     uplink closes (it refuses everything until reopened), the provider is suspended (only its passive
- *     vehicle-condition watch stays) and the state file is written once. A condition change is the only way
- *     back: the suspended provider notifies its listeners for it, and the listener updates the gate.
+ *   - asleep: none of the app's timers. The tick stops, the pop-up presenter closes everything, the dialog poll
+ *     ends, the uplink closes (it refuses everything until reopened), the provider is suspended (only its passive
+ *     vehicle-condition watch stays) and the state file is written if anything in it changed. The kit's screen
+ *     loop and its renderer keep-alive are not the app's: they follow the screen's visibility, not the power
+ *     gate, so they keep running for as long as the head unit reports the app's screen shown. A visibility
+ *     change while asleep is logged (info), so the owner's car check can see whether the screen is hidden.
+ *   - the way back: a condition notification (the suspended provider notifies its listeners for it, and the
+ *     listener updates the gate), or the owner using the app — a question asked, the screen shown, or the
+ *     pairing panel on screen (each tick) — which restarts the gate's idle fallback (PowerGate.touch). A car that
+ *     reports parked or standby stays asleep: only the fallback, taken when the condition is unknown or stale,
+ *     gives way to use.
  *   - waking: the provider resumes, the uplink reopens and lifts a refusal block (retry), the tick starts again,
  *     the car's config (owner limits, the phone's pop-up switch) is fetched once when online.
+ *
+ * Failed requests back off: after a failure the dialog poll waits POLL_RETRY_MS and the config fetch
+ * CONFIG_RETRY_MS, each wait doubling with every further failure up to RETRY_MAX_MS, and starting over on
+ * waking and on any request the backend answers (a poll waiting out a longer step is then issued at once). A
+ * poll refused locally as `offline` (no lease: nothing was sent) is no failure of the link: it waits the first
+ * step again. While the pairing panel shows, a pairing retry (every 30 s) tries the poll at once whatever
+ * failed before, so registering on the phone is seen within half a minute.
+ *
+ * A wrong head-unit clock (a request failed because the server's certificate is not valid at this time) is
+ * shown as soon as it is known: on the pairing panel in place of its instructions, or in the assistant tab's
+ * answer area (ScreenInput.clockWrong). It is logged once per waking period, forgotten on waking (the first
+ * request then finds it again) and cleared by any request the backend answers.
  *
  * Pairing: the car makes up its device id and secret on its first run (`random`). The pairing panel (a QR code
  * of the phone's /pair address) shows until the backend has answered a request from this device as authorised;
@@ -21,7 +40,9 @@
  *
  * Alerts to the phone: a raised `critical` or `warning` alert is sent at once; its clearing and a re-opening (both
  * under the id of the raise) are queued and go with the next raise or the next minute's batch (UplinkClient
- * queueAlerts), so the car link stays within its once-a-minute budget. The backend has no rules of its own when
+ * queueAlerts), so the car link stays within its once-a-minute budget. What the uplink has not delivered (an alert
+ * send in flight and its queue) rides along in every state write (`pendingAlerts`; it never causes a write of its own) and is queued again
+ * once when the next process starts, so a clearing queued while offline is not lost with the process. The backend has no rules of its own when
  * the car is the vehicle source: without these, an alert the car raised would never clear on the phone. `info`
  * alerts stay on the car, and so do their clearings, except a clearing rebuilt after a restart (severity 'info',
  * empty title), whose original severity is unknown.
@@ -31,10 +52,18 @@
  * listed, kept or sent. The app cannot turn the switch back off (our code has no settings writer: kit.d.ts), so
  * it fires once per off-to-on change. While asleep it does nothing.
  *
- * Writes (spec §9): the state file is written when the car falls asleep (once per drive), when the device is
- * created, when pairing changes, and when the owner's settings or the fetched config change. persist() writes it
- * only if something changed since the last write; main.ts calls it when the process exits, so a restart in the
- * middle of a drive keeps the alert memory. The device secret is never logged.
+ * Writes (spec §9): the state file is written when the car falls asleep (only if something changed), when the
+ * device is created, when pairing changes, when the owner's settings or the fetched config change, and when a
+ * `critical` or `warning` alert is raised (at once; the engine's global rate limit bounds these) or cleared (at
+ * most once per ALERT_SAVE_GAP_MS, a clearing inside that gap is written by the first tick after it), so a
+ * restart in the middle of a drive, even one without a clean exit, keeps the alert memory. persist() writes it
+ * only if something changed since the last write; main.ts calls it when the process exits. A failed write is
+ * not counted as saved, so the next chance writes it again. The device secret is never logged.
+ *
+ * A question asked while the car is not driving (no minute batches then) carries the car's current snapshot,
+ * which the uplink sends alone just before it, so the answer is built from the readings of now and not from the
+ * last drive's upload. Turns from the backend are checked (string id, question and answer) and their text cut to
+ * TURN_TEXT_MAX before they are kept or drawn.
  *
  * Every timer callback, listener and promise chain goes through safe() (car/src/safe.ts).
  */
@@ -51,7 +80,7 @@ import { measure, type Sample } from './selfmeasure';
 import { StateFile, type PersistedState } from './state/state-file';
 import type { FrameFn } from './ui/draw-header';
 import { SCREEN, startScreen, type Screen, type ScreenInput } from './ui/screen';
-import { TEXT_TEST_POPUP } from './ui/strings.uk';
+import { TEXT_CLOCK, TEXT_TEST_POPUP } from './ui/strings.uk';
 import { pairingUrl } from './ui/view-model';
 import { HttpsClient, UplinkError, type RequestOptions } from './uplink/https-client';
 import { readLease } from './uplink/lease';
@@ -90,12 +119,16 @@ export interface AppHandle {
 export const TICK_MS = 1000;
 /** A snapshot is kept for the uplink at most this often (it sends them only while driving, once a minute). */
 export const SNAPSHOT_EVERY_MS = 60_000;
-/** After a failed dialog poll (or one answered at once with nothing), the next one waits this long. */
+/** After a failed dialog poll (or one answered at once with nothing), the next one waits this long (the first step). */
 export const POLL_RETRY_MS = 5000;
 /** While the pairing panel is shown, a refused device is tried again at most this often. */
 export const PAIRING_RETRY_MS = 30_000;
-/** A config fetch that failed is tried again at most this often while awake. */
+/** A config fetch that failed is tried again after this long while awake (the first step). */
 export const CONFIG_RETRY_MS = 60_000;
+/** Each further failure doubles the wait of the dialog poll and of the config fetch, up to this. */
+export const RETRY_MAX_MS = 600_000;
+/** Alert clearings reach the state file at most this often (a raise is written at once). */
+export const ALERT_SAVE_GAP_MS = 60_000;
 /** The screen's alert list keeps at most this many events (it shows four). */
 export const LISTED_MAX = 20;
 /** Device id: 12 random bytes, 24 hex characters (the backend accepts 16-64 URL-safe characters). */
@@ -107,16 +140,27 @@ export const TEST_POPUP_SETTING = 'testPopup';
 /** The presenter's de-duplication id of the test pop-up. */
 const TEST_POPUP_ID = 'copilot-test-popup';
 
-/** The Ukrainian error lines on the assistant tab (plan 2 Task 9). */
+/** The Ukrainian error lines on the assistant tab (plan 2 Task 9); TEXT_CLOCK lives in ui/strings.uk.ts. */
 export const TEXT_NO_SERVER = 'Немає зв\'язку з сервером';
-export const TEXT_CLOCK = 'Годинник головного блока неправильний';
+export { TEXT_CLOCK };
 export const TEXT_REFUSED = 'Сервер відхилив запит';
 
-/** The line for a failed question. */
+/** The wait after `failures` failures in a row: `first`, doubled for each further one, at most RETRY_MAX_MS. */
+function backoff(first: number, failures: number): number {
+  let wait = first;
+  for (let i = 1; i < failures && wait < RETRY_MAX_MS; i++) wait *= 2;
+  return Math.min(wait, RETRY_MAX_MS);
+}
+
+/**
+ * The line for a failed question: the server reached but answering with a refusal or an error (4xx, 5xx, a reset
+ * connection, a reply of the wrong shape) is «Сервер відхилив запит»; no network, a resolver, TLS or timeout
+ * failure is «Немає зв'язку з сервером»; a wrong clock has its own line.
+ */
 function errorLine(error: unknown): string {
   const kind = error instanceof UplinkError ? error.kind : null;
   if (kind === 'clock') return TEXT_CLOCK;
-  if (kind === 'unauthorized' || kind === 'client-error') return TEXT_REFUSED;
+  if (kind === 'unauthorized' || kind === 'client-error' || kind === 'server-error') return TEXT_REFUSED;
   return TEXT_NO_SERVER;
 }
 
@@ -140,8 +184,31 @@ const NO_DISK: FsApi = {
   renameSync: () => undefined,
 };
 
-function isTurn(v: unknown): v is DialogTurn {
-  return typeof v === 'object' && v !== null && typeof (v as { id?: unknown }).id === 'string';
+/** A turn's question and answer are cut to this many characters (the screen shows eight lines of the answer). */
+export const TURN_TEXT_MAX = 2000;
+/** A turn id longer than this is refused (it is sent back in the poll's query, so it is never cut). */
+export const TURN_ID_MAX = 128;
+
+function cutText(text: string): string {
+  return text.length > TURN_TEXT_MAX ? text.slice(0, TURN_TEXT_MAX) : text;
+}
+
+/** A checked copy of a turn from the backend, its text cut to TURN_TEXT_MAX; null when it is not a turn. */
+function turnFrom(v: unknown): DialogTurn | null {
+  if (typeof v !== 'object' || v === null) return null;
+  const t = v as Record<string, unknown>;
+  if (typeof t.id !== 'string' || t.id === '' || t.id.length > TURN_ID_MAX) return null;
+  if (typeof t.question !== 'string' || typeof t.answer !== 'string') return null;
+  return {
+    id: t.id,
+    at: typeof t.at === 'number' && isFinite(t.at) ? t.at : 0,
+    question: cutText(t.question),
+    answer: cutText(t.answer),
+    style: t.style === 'spoken' ? 'spoken' : 'full',
+    source: t.source === 'panel' || t.source === 'voice' ? t.source : 'car',
+    model: typeof t.model === 'string' ? t.model.slice(0, TURN_ID_MAX) : '',
+    snapshotAt: typeof t.snapshotAt === 'number' && isFinite(t.snapshotAt) ? t.snapshotAt : null,
+  };
 }
 
 /** Whether an event goes to the phone: raised alerts the car pops up, and every later state of those. */
@@ -186,6 +253,12 @@ export function startApp(deps: AppDeps): AppHandle {
   const stateFile = new StateFile({ dir: dataDir || '', fs: dataDir ? fs : NO_DISK, log });
   const state: PersistedState = stateFile.load();
   state.paired = state.paired === true;
+  // the alerts the last process had not delivered: queued again once the uplink exists; from then on the uplink
+  // holds them, and every write carries its copy (pendingAlerts below)
+  const restoredAlerts: AlertEvent[] = Array.isArray(state.pendingAlerts) ? state.pendingAlerts : [];
+  state.pendingAlerts = undefined;
+  /** What the uplink has not delivered; set once the uplink exists (before that, what the file held). */
+  let pendingAlerts = (): AlertEvent[] => restoredAlerts;
   const latin = setting('latinPopups');
   if (typeof latin === 'boolean') state.asciiPopups = latin;
 
@@ -197,17 +270,26 @@ export function startApp(deps: AppDeps): AppHandle {
   }
 
   let lastSaved = '';
+  /** The state as compared for a change: the unsent alerts are left out, so they never cause a write of their own. */
   const snapshotOfState = (): string => {
     state.engine = engine.state();
     return JSON.stringify(state);
   };
   const save = (): void => {
+    let current: string;
     try {
-      lastSaved = snapshotOfState();
+      current = snapshotOfState();
     } catch {
-      lastSaved = '';
+      current = '';
     }
-    stateFile.save(state);
+    let pending: AlertEvent[];
+    try {
+      pending = pendingAlerts();
+    } catch {
+      pending = [];
+    }
+    // a failed write is not counted as saved: saveIfChanged() then writes it again at the next chance
+    lastSaved = stateFile.save(Object.assign({}, state, { pendingAlerts: pending })) ? current : '';
   };
   const saveIfChanged = (): void => {
     let current: string;
@@ -251,6 +333,16 @@ export function startApp(deps: AppDeps): AppHandle {
   });
   const gate = new PowerGate({ clock });
 
+  /**
+   * The owner used the app (a question, the screen shown, the pairing panel on screen): restarts the idle fallback
+   * and lets the gate decide again, so a quiet car that idled asleep wakes; a car reporting parked stays asleep.
+   */
+  const noteUse = safe(log, 'power gate', (): void => {
+    if (stopped) return;
+    gate.touch();
+    gate.update(provider.snapshot());
+  });
+
   /** The alerts the screen lists: newest raise or clearing per id, at most LISTED_MAX. */
   let listed: AlertEvent[] = [];
   const list = (event: AlertEvent): void => {
@@ -281,6 +373,19 @@ export function startApp(deps: AppDeps): AppHandle {
 
   /* the uplink, with every answer watched: an authorised answer pairs the car, a 401/403 unpairs it */
   let answered = false;
+  /** The last request failed because the head unit's clock is wrong; an answer from the backend clears it. */
+  let clockWrong = false;
+  let clockLogged = false;
+  /** Called on every answer from the backend (set below, once the config fetch exists). */
+  let onAnswered: () => void = () => undefined;
+  const answeredStep = safe(log, 'answered', () => onAnswered());
+  const noteClock = safe(log, 'clock', (wrong: boolean) => {
+    clockWrong = wrong;
+    if (wrong && !clockLogged) {
+      clockLogged = true;
+      log.warn('uplink: the head unit\'s clock is wrong (the server\'s certificate is not valid at this time); every request fails until it is set right');
+    }
+  });
   const http: HttpsClient | null = deps.http || (backendUrl
     ? new HttpsClient({ baseUrl: backendUrl, lease: () => readLease(dataDir || '', dataDir ? fs : NO_DISK), log, timers, clock })
     : null);
@@ -303,17 +408,41 @@ export function startApp(deps: AppDeps): AppHandle {
     http.request = function watched<T>(method: 'GET' | 'POST', path: string, body: unknown, bearer: string, options?: RequestOptions): Promise<T> {
       return request<T>(method, path, body, bearer, options).then(
         (value) => {
+          noteClock(false);
           noteAnswer(true);
+          answeredStep();
           return value;
         },
         (error: unknown) => {
-          if (error instanceof UplinkError && error.kind === 'unauthorized') noteAnswer(false);
+          if (error instanceof UplinkError && error.kind === 'clock') noteClock(true);
+          if (error instanceof UplinkError && error.kind === 'unauthorized') {
+            noteClock(false);                                   // a 401 came back over TLS: the clock is fine
+            noteAnswer(false);
+          }
           throw error;
         },
       );
     };
   }
   const uplink = http ? new UplinkClient({ http, device: () => state.device, clock, log }) : null;
+  if (uplink) {
+    uplink.queueAlerts(restoredAlerts);
+    pendingAlerts = () => uplink.pendingAlerts();
+  }
+
+  let alertSaveDue = false;
+  let alertSavedAt: number | null = null;
+  /** Writes the alert memory: a raise at once, a clearing at most once per ALERT_SAVE_GAP_MS (else by a later tick). */
+  const saveAlertMemory = (now: boolean): void => {
+    const at = clock.now();
+    if (!now && alertSavedAt !== null && at >= alertSavedAt && at - alertSavedAt < ALERT_SAVE_GAP_MS) {
+      alertSaveDue = true;
+      return;
+    }
+    alertSaveDue = false;
+    alertSavedAt = at;
+    saveIfChanged();
+  };
 
   const runner = new RuleRunner({
     provider,
@@ -323,6 +452,7 @@ export function startApp(deps: AppDeps): AppHandle {
     onEvents: (events) => {
       const upload: AlertEvent[] = [];
       let raised = false;
+      let cleared = false;
       for (const event of events) {
         list(event);
         // the identical object the runner handed over: its re-opened mark is keyed on object identity
@@ -330,11 +460,16 @@ export function startApp(deps: AppDeps): AppHandle {
         if (!uploads(event)) continue;
         upload.push(event);
         if (event.active && !isReopened(event)) raised = true;
+        if (!event.active) cleared = true;
       }
-      if (!uplink || upload.length === 0) return;
-      // a raise goes at once (with what waits before it); clearings and re-openings ride with the next send
-      if (raised) uplink.sendAlerts(upload);
-      else uplink.queueAlerts(upload);
+      // a raise goes at once (with what waits before it); clearings and re-openings ride with the next send.
+      // Handed over before the write below, so that write carries them while they are undelivered.
+      if (uplink && upload.length > 0) {
+        if (raised) uplink.sendAlerts(upload);
+        else uplink.queueAlerts(upload);
+      }
+      // the alert memory reaches the disk now, so a restart mid-drive (even a killed process) does not repeat it
+      if (raised || cleared) saveAlertMemory(raised);
     },
   });
 
@@ -359,6 +494,7 @@ export function startApp(deps: AppDeps): AppHandle {
     error,
     link: linkStatus(),
     pairUrl: pairingUrl(backendUrl, state.device),
+    clockWrong,
   });
 
   const screenVisible = (): boolean => {
@@ -371,16 +507,25 @@ export function startApp(deps: AppDeps): AppHandle {
 
   const ask = (question: string, moving: boolean): void => {
     if (asking || stopped) return;
+    noteUse();
     if (!uplink) {
       error = TEXT_NO_SERVER;
       return;
     }
     asking = true;
     error = null;
-    uplink.ask(question, moving ? 'spoken' : 'full').then(
-      safe(log, 'ask', (turn: DialogTurn) => {
+    // not driving, no minute batch keeps the backend current: the question carries the readings of now
+    let current: VehicleSnapshot | undefined;
+    try {
+      current = gate.state() === 'driving' ? undefined : provider.snapshot();
+    } catch {
+      current = undefined;
+    }
+    uplink.ask(question, moving ? 'spoken' : 'full', current).then(
+      safe(log, 'ask', (reply: DialogTurn) => {
         asking = false;
-        if (isTurn(turn)) {
+        const turn = turnFrom(reply);
+        if (turn !== null) {
           lastTurn = turn;
           lastTurnId = turn.id;
         }
@@ -404,23 +549,44 @@ export function startApp(deps: AppDeps): AppHandle {
   let polling = false;
   let pollGen = 0;
   let pollWait: unknown = null;
+  /** Failed polls in a row (the wait before the next one doubles with each). */
+  let pollFailures = 0;
+  /**
+   * Answered polls in a row whose newest turn was refused (turnFrom). Kept apart from pollFailures, which every
+   * answer from the backend resets: the link works, the reply does not, and the same `after` would bring the same
+   * turn back at once.
+   */
+  let pollRefusals = 0;
   /** Ends the poll that is open now, alone (UplinkClient.pollDialog's cancel handle); null when none is. */
   let pollCancel: (() => void) | null = null;
 
   const pollAllowed = (): boolean => !!uplink && !stopped && gate.state() !== 'asleep' && screenVisible();
 
-  const takeTurns = (turns: DialogTurn[]): void => {
-    if (!Array.isArray(turns) || turns.length === 0) return;
-    const last = turns[turns.length - 1];
-    if (!isTurn(last)) return;
+  /** Keeps the newest turn of a poll reply; false when the reply had turns but the newest was refused. */
+  const takeTurns = (turns: DialogTurn[]): boolean => {
+    if (!Array.isArray(turns) || turns.length === 0) return true;
+    // only the newest is kept and drawn
+    const last = turnFrom(turns[turns.length - 1]);
+    if (last === null) return false;
     lastTurn = last;
     lastTurnId = last.id;
     if (!asking) error = null;
+    return true;
   };
 
-  const waitThenPoll = (): void => {
+  const waitThenPoll = (ms: number): void => {
     if (!pollAllowed() || pollWait !== null) return;
-    pollWait = timers.setTimeout(afterWait, POLL_RETRY_MS);
+    pollWait = timers.setTimeout(afterWait, ms);
+  };
+
+  /** Drops a waiting retry and issues the poll now (when allowed and none is open). */
+  const pollNow = (): void => {
+    if (polling) return;
+    if (pollWait !== null) {
+      timers.clearTimeout(pollWait);
+      pollWait = null;
+    }
+    pumpPoll();
   };
 
   const pumpPoll = (): void => {
@@ -436,18 +602,32 @@ export function startApp(deps: AppDeps): AppHandle {
         if (gen !== pollGen) return;
         polling = false;
         pollCancel = null;
-        takeTurns(turns);
+        pollFailures = 0;
+        if (!takeTurns(turns)) {
+          // nothing taken and `after` unchanged: re-issuing at once would bring the same turn back at network speed
+          if (pollRefusals === 0) log.warn('dialog poll: the newest turn from the backend was refused (wrong shape)');
+          if (pollRefusals < 64) pollRefusals++;
+          waitThenPoll(backoff(POLL_RETRY_MS, pollRefusals));
+          return;
+        }
+        pollRefusals = 0;
         const now = clock.now();
         // the server holds an empty poll for 25 s: one answered at once with nothing is not re-issued at once
         const quick = (!Array.isArray(turns) || turns.length === 0) && now >= issuedAt && now - issuedAt < POLL_RETRY_MS;
-        if (quick) waitThenPoll();
+        if (quick) waitThenPoll(POLL_RETRY_MS);
         else pumpPoll();
       }),
-      safe(log, 'dialog poll', () => {
+      safe(log, 'dialog poll', (failure: unknown) => {
         if (gen !== pollGen) return;
         polling = false;
         pollCancel = null;
-        waitThenPoll();
+        // refused locally for want of a lease: nothing was sent, so it is no failure of the link to back off from
+        if (failure instanceof UplinkError && failure.kind === 'offline') {
+          waitThenPoll(POLL_RETRY_MS);
+          return;
+        }
+        if (pollFailures < 64) pollFailures++;
+        waitThenPoll(backoff(POLL_RETRY_MS, pollFailures));
       }),
     );
   };
@@ -481,6 +661,21 @@ export function startApp(deps: AppDeps): AppHandle {
   let configWanted = true;
   let configBusy = false;
   let configTriedAt: number | null = null;
+  /** Failed config fetches in a row (the wait before the next one doubles with each). */
+  let configFailures = 0;
+
+  // any answer from the backend shows the link works: the poll's back-off starts over (a poll waiting out a
+  // longer step goes now), and a config fetch still wanted goes at the next tick
+  onAnswered = () => {
+    if (pollFailures > 0) {
+      pollFailures = 0;
+      if (pollWait !== null) pollNow();
+    }
+    if (configWanted && !configBusy && configFailures > 0) {
+      configFailures = 0;
+      configTriedAt = null;
+    }
+  };
 
   const applyConfig = (config: CarConfigResponse): void => {
     const limits = config.ownerLimits;
@@ -499,7 +694,7 @@ export function startApp(deps: AppDeps): AppHandle {
   const maybeFetchConfig = safe(log, 'config', (): void => {
     if (!uplink || !http || !configWanted || configBusy || stopped || gate.state() === 'asleep') return;
     const now = clock.now();
-    if (configTriedAt !== null && now >= configTriedAt && now - configTriedAt < CONFIG_RETRY_MS) return;
+    if (configTriedAt !== null && now >= configTriedAt && now - configTriedAt < backoff(CONFIG_RETRY_MS, configFailures)) return;
     if (!http.online()) return;
     configBusy = true;
     configTriedAt = now;
@@ -507,10 +702,12 @@ export function startApp(deps: AppDeps): AppHandle {
       safe(log, 'config', (config: CarConfigResponse) => {
         configBusy = false;
         configWanted = false;
+        configFailures = 0;
         applyConfig(config);
       }),
       safe(log, 'config', () => {
         configBusy = false;
+        if (configFailures < 64) configFailures++;
       }),
     );
   });
@@ -537,8 +734,17 @@ export function startApp(deps: AppDeps): AppHandle {
     maybeFetchConfig();
     if (!state.paired && screenVisible() && (lastRetryAt === null || now < lastRetryAt || now - lastRetryAt >= PAIRING_RETRY_MS)) {
       lastRetryAt = now;
+      const refused = uplink.status() === 'unpaired';
       uplink.retry();
+      // try the poll now rather than after its back-off, whatever failed before (a refusal, the resolver, the
+      // clock), so a device the owner has just registered on the phone is seen within PAIRING_RETRY_MS (one
+      // request per retry); a refusal lifted by retry() also starts the back-off over
+      if (refused) pollFailures = 0;
+      pollNow();
     }
+  });
+  const stepAlertSave = safe(log, 'state file', () => {
+    if (alertSaveDue) saveAlertMemory(false);
   });
   const stepMeasure = safe(log, 'self-measure', () => {
     const r = measure(sample, clock.now(), () => process.memoryUsage(), () => process.cpuUsage());
@@ -549,9 +755,12 @@ export function startApp(deps: AppDeps): AppHandle {
   const tick = safe(log, 'tick', () => {
     if (stopped) return;
     stepRules();
+    // the pairing panel on screen is the owner setting the car up: it does not idle out
+    if (!state.paired && screenVisible()) gate.touch();
     stepGate();
     if (gate.state() === 'asleep' || stopped) return;
     stepUplink();
+    stepAlertSave();
     stepMeasure();
   });
 
@@ -574,7 +783,8 @@ export function startApp(deps: AppDeps): AppHandle {
     if (uplink) uplink.close();
     answered = false;
     provider.suspend();
-    save();
+    alertSaveDue = false;
+    saveIfChanged();
   };
 
   const wakeUp = (): void => {
@@ -585,6 +795,14 @@ export function startApp(deps: AppDeps): AppHandle {
     }
     configWanted = true;
     configTriedAt = null;
+    configFailures = 0;
+    pollFailures = 0;
+    pollRefusals = 0;
+    // the clock is judged afresh by the first request of this waking period, and logged again if still wrong
+    clockWrong = false;
+    clockLogged = false;
+    // the first self-measurement after a wake takes a baseline: it never averages over the time asleep
+    sample = null;
     lastRetryAt = clock.now();
     startTick();
     maybeFetchConfig();
@@ -597,13 +815,17 @@ export function startApp(deps: AppDeps): AppHandle {
     else if (previous === 'asleep') wakeUp();
   }));
 
-  // asleep, no tick runs: a condition change (the suspended provider notifies it) is the only way back
+  // asleep, no tick runs: a condition notification (the suspended provider notifies it) wakes the app, as does
+  // the owner using it (noteUse)
   provider.onChange((snapshot: VehicleSnapshot) => {
     if (!stopped && gate.state() === 'asleep') gate.update(snapshot);
   });
 
   ctx.ui.onVisible(safe(log, 'visible', (name: string, on: boolean) => {
     if (name !== SCREEN || stopped) return;
+    if (on) noteUse();
+    // the kit's screen loop follows the visibility, not the gate: say so while asleep (the owner's car check)
+    if (gate.state() === 'asleep') log.info('screen: ' + (on ? 'shown' : 'hidden') + ' while asleep');
     if (on) pumpPoll();
     else stopPoll();
   }));

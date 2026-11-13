@@ -67,6 +67,20 @@ describe('measure', () => {
     expect(later.line).toBe('self: rss=41MB heap=12MB cpu=0.0%');
   });
 
+  test('a window longer than two intervals (the app slept, or the clock jumped ahead) starts a new baseline', () => {
+    const { m, mem, cpu } = meters();
+    const s = measure(null, 0, mem, cpu).sample;
+    m.user = 60_000_000;                                       // a busy minute before the sleep
+    const woke = measure(s, 4 * 3_600_000, mem, cpu);          // four hours later
+    expect(woke.line).toBeNull();
+    expect(woke.sample).toMatchObject({ at: 4 * 3_600_000, user: 60_000_000 });
+    m.user += 6_000_000;                                       // 6 s of CPU over the next ten minutes = 1.0 %
+    expect(measure(woke.sample, 4 * 3_600_000 + SELF_MEASURE_INTERVAL_MS, mem, cpu).line).toBe('self: rss=41MB heap=12MB cpu=1.0%');
+    // a window of up to two intervals (a tick or two late) still gives its line
+    const ok = measure(s, 2 * SELF_MEASURE_INTERVAL_MS, mem, cpu);
+    expect(ok.line).not.toBeNull();
+  });
+
   test('CPU counters that went down do not print a negative share', () => {
     const { m, mem, cpu } = meters();
     m.user = 9_000_000;

@@ -230,4 +230,32 @@ describe('PowerGate', () => {
     clock.t = IDLE_FALLBACK_MS * 2;
     expect(gate.update(s)).toBe('awake');
   });
+
+  test('touch() (the owner used the app) restarts the idle fallback and wakes a gate that fell asleep on it', () => {
+    const clock = manualClock(0);
+    const gate = new PowerGate({ clock });
+    const calls = recorder(gate);
+    const quiet = noCondition(0, null);
+    gate.update(quiet);
+    clock.t = IDLE_FALLBACK_MS - 1;
+    gate.touch();
+    clock.t = IDLE_FALLBACK_MS + 1;
+    expect(gate.update(quiet)).toBe('awake');           // counted from the touch, not from the start
+    clock.t = 2 * IDLE_FALLBACK_MS;
+    expect(gate.update(quiet)).toBe('asleep');
+    gate.touch();
+    expect(gate.update(quiet)).toBe('awake');
+    expect(calls).toEqual([['asleep', 'awake'], ['awake', 'asleep']]);
+  });
+
+  test('touch() does not wake a car that reports parked or standby', () => {
+    const clock = manualClock(0);
+    const gate = new PowerGate({ clock });
+    for (const condition of ['parked', 'standby'] as VehicleCondition[]) {
+      const s = withCondition(condition, clock.t);
+      expect(gate.update(s)).toBe('asleep');
+      gate.touch();
+      expect(gate.update(s)).toBe('asleep');
+    }
+  });
 });

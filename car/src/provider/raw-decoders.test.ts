@@ -181,6 +181,21 @@ describe('applyRaw', () => {
     ]);
   });
 
+  test('Check Control colours follow the reference table: white and green info; default, numbers and anything else a warning', () => {
+    // A:apps/dtc_scanner/main.js:423 COL = { RED: crit, YELLOW: warn, ORANGE: warn, GREEN: GO, WHITE: text }
+    const cases: Array<[unknown, string]> = [
+      ['RED', 'critical'], ['YELLOW', 'warning'], ['ORANGE', 'warning'], ['GREEN', 'info'], ['WHITE', 'info'],
+      ['DEFAULT', 'warning'], [1, 'warning'], [0, 'warning'], [undefined, 'warning'],
+    ];
+    cases.forEach(([colour, severity], i) => {
+      const state = createDecoderState();
+      const s = emptySnapshot(0);
+      applyRaw(s, KOMBI2, 'ccList', [{ cCIdentifer: 950 + i, cCShortName: 'Colour ' + i, cCColor: colour }], 1, state);
+      applyRaw(s, CCM, 'basicList', [{ ccmId: 950 + i, activeState: 0 }], 1, state);
+      expect([colour, (valueOf(s.checkControl) as Array<{ severity: string }>)[0].severity]).toEqual([colour, severity]);
+    });
+  });
+
   test('Check Control texts are cleaned and bounded; a junk master list is invalid-value', () => {
     const state = createDecoderState();
     const s = emptySnapshot(0);

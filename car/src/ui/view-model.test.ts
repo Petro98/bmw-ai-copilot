@@ -17,7 +17,7 @@ import {
 import { pairingLines } from './draw-pairing';
 import { encodeQr } from './qr';
 import { fitText } from './theme';
-import { PAIRING_NO_ADDRESS } from './strings.uk';
+import { PAIRING_LINES, PAIRING_NO_ADDRESS, TEXT_CLOCK } from './strings.uk';
 import { startScreen, type ScreenKit } from './screen';
 import type { Log } from '../safe';
 
@@ -331,15 +331,40 @@ describe('status and pairing', () => {
     expect(pairingUrl('https://example.invalid', null)).toBeNull();
 
     const withUrl = buildViewModel(input({ link: 'unpaired', pairUrl: url }));
-    expect(withUrl.pairing).toEqual({ paired: false, url });
+    expect(withUrl.pairing).toEqual({ paired: false, url, note: null });
     expect(pairingLines(withUrl.pairing)).toHaveLength(2);
 
     const without = buildViewModel(input({ link: 'unpaired', pairUrl: null }));
-    expect(without.pairing).toEqual({ paired: false, url: null });
+    expect(without.pairing).toEqual({ paired: false, url: null, note: null });
     expect(pairingLines(without.pairing)[0]).toBe(PAIRING_NO_ADDRESS);
     expect(PAIRING_NO_ADDRESS).toBe('Адресу сервера не налаштовано');
 
-    expect(buildViewModel(input({ link: 'ok', pairUrl: url })).pairing).toEqual({ paired: true, url: null });
+    expect(buildViewModel(input({ link: 'ok', pairUrl: url })).pairing).toEqual({ paired: true, url: null, note: null });
+  });
+
+  test('a wrong head-unit clock is shown at once: on the pairing panel in place of its instructions, and on the assistant tab', () => {
+    expect(TEXT_CLOCK).toBe('Годинник головного блока неправильний');
+    const url = 'https://example.invalid/pair#d=dev_0123456789abcdef&s=' + 'S'.repeat(43);
+
+    // unpaired: the QR code stays (the phone can still register the car), the line replaces the instructions
+    const unpaired = buildViewModel(input({ link: 'unpaired', pairUrl: url, clockWrong: true }));
+    expect(unpaired.pairing).toEqual({ paired: false, url, note: TEXT_CLOCK });
+    expect(pairingLines(unpaired.pairing)).toEqual([TEXT_CLOCK]);
+    expect(pairingLines(buildViewModel(input({ link: 'unpaired', pairUrl: url })).pairing)).toEqual(PAIRING_LINES.slice());
+    // the signature (what the tab draws) changes with it, so the page is redrawn
+    expect(unpaired.signature).not.toBe(buildViewModel(input({ link: 'unpaired', pairUrl: url })).signature);
+
+    // paired: the answer area says it without a question being asked; the last answer gives way to it
+    const turn: DialogTurn = { id: 't', at: NOW, question: 'Q', answer: 'A', style: 'full', source: 'car', model: 'm', snapshotAt: null };
+    const paired = buildViewModel(input({ link: 'clock', clockWrong: true, lastTurn: turn }));
+    expect(paired.assistant).toMatchObject({ error: TEXT_CLOCK, question: null, answer: null });
+    expect(paired.pairing.note).toBeNull();
+    expect(paired.status).toMatchObject({ network: false, claude: false });
+    // a question's own error and a pending question come first
+    expect(buildViewModel(input({ link: 'clock', clockWrong: true, error: 'Сервер відхилив запит' })).assistant.error).toBe('Сервер відхилив запит');
+    expect(buildViewModel(input({ link: 'clock', clockWrong: true, pending: true })).assistant).toMatchObject({ error: null, pending: true });
+    // without it, nothing changes
+    expect(buildViewModel(input({ lastTurn: turn })).assistant).toMatchObject({ error: null, answer: 'A' });
   });
 });
 

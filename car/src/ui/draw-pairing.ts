@@ -2,7 +2,8 @@
  * Pairing, shown on the assistant tab until the device is registered: a QR code of
  * `<backendUrl>/pair#d=<deviceId>&s=<secret>` (view-model.ts pairingUrl) and two lines of instruction. The
  * phone's /pair page reads the fragment, registers the device and strips it (Plan 2 Task 7). Without a
- * backend address in the app's config: «Адресу сервера не налаштовано» and no QR.
+ * backend address in the app's config: «Адресу сервера не налаштовано» and no QR. While requests fail because the
+ * head unit's clock is wrong, «Годинник головного блока неправильний» replaces the two instructions.
  *
  * The code is dark modules (`ground`) on a light square (`ink`) with the standard four-module quiet zone,
  * each module a whole number of page pixels. The matrix is computed once per address (a few milliseconds)
@@ -15,9 +16,13 @@ import { C, SPACE, T, baseline, box, label, lines, wrap, type Pen } from './them
 
 const QUIET = 4;
 
-/** The pairing panel's words: the two instructions, or the missing-address line and its note. */
+/**
+ * The pairing panel's words: the two instructions, the note that replaces them (the wrong-clock line: no request
+ * can succeed, so scanning the code alone cannot finish pairing), or the missing-address line and its note.
+ */
 export function pairingLines(pairing: ViewModel['pairing']): string[] {
-  return pairing.url ? PAIRING_LINES.slice() : [PAIRING_NO_ADDRESS, PAIRING_NO_ADDRESS_NOTE];
+  if (!pairing.url) return [PAIRING_NO_ADDRESS, PAIRING_NO_ADDRESS_NOTE];
+  return pairing.note ? [pairing.note] : PAIRING_LINES.slice();
 }
 
 let cached: { text: string; matrix: boolean[][] } | null = null;
@@ -63,6 +68,7 @@ export function drawPairing(p: Pen, pairing: ViewModel['pairing'], x: number, y:
   const head = wrap(p, first, T.title.size, room, 2);
   lines(p, head, tx, baseline(top, T.title.size, T.title.line), T.title.size, T.title.line, C.ink);
   top += head.length * T.title.line + SPACE.s3;
+  if (second === undefined) return;
   const rest = wrap(p, second, T.answer.size, room, 3);
   lines(p, rest, tx, baseline(top, T.answer.size, T.answer.line), T.answer.size, T.answer.line, C.inkDim);
 }

@@ -341,6 +341,30 @@ test('after unauthorized nothing more is sent', async () => {
   expect(state.calls[1].bearer).toBe('device-0002.secret-0002');
 });
 
+test('a refusal repeated after each pairing retry() is logged once, then at most once every ten minutes', async () => {
+  const warnings: string[] = [];
+  const { http, state } = fakeHttp(fail('unauthorized'));
+  const clock = { t: 1_000_000, now() { return this.t; } };
+  const log: Log = { info() {}, warn: (m: string) => void warnings.push(m), error() {} };
+  const uplink = new UplinkClient({ http, device: () => ({ id: 'device-0001', secret: 'secret-0001' }), clock, log });
+  // the pairing panel: retry() every 30 s, each followed by one refused request, for twenty minutes
+  for (let s = 0; s < 40; s++) {
+    uplink.retry();
+    await expect(uplink.fetchConfig()).rejects.toMatchObject({ kind: 'unauthorized' });
+    clock.t += 30_000;
+  }
+  expect(warnings).toHaveLength(2);
+  for (const w of warnings) expect(w).toMatch(/refused a request \(unauthorized\)/);
+  // a different refusal is logged at once
+  state.reply = fail('client-error');
+  uplink.retry();
+  uplink.recordSnapshot(snap(1));
+  uplink.onTick('driving');
+  await settle();
+  expect(warnings).toHaveLength(3);
+  expect(warnings[2]).toMatch(/client-error/);
+});
+
 test('after a client error nothing more is sent either', async () => {
   const { uplink, state, clock } = setup({ reply: fail('client-error') });
   uplink.sendAlerts([alert(1)]);
@@ -776,4 +800,201 @@ test('no timer is created by the client', async () => {
   uplink.reopen();
   await settle();
   for (const spy of timers) expect(spy).not.toHaveBeenCalled();
+});
+
+test('every batch carries sentAt, the car\'s clock at the moment it is sent, stamped again on a resend', async () => {
+  const { uplink, state, clock } = setup({ reply: fail('server-error') });
+  uplink.recordSnapshot(snap(1));
+  clock.t = 2_000_000;
+  uplink.onTick('driving');
+  await settle();
+  expect(state.calls[0].body.sentAt).toBe(2_000_000);
+  state.reply = () => Promise.resolve(undefined);
+  clock.t = 2_000_000 + MINUTE + 1234;
+  uplink.onTick('driving');
+  await settle();
+  expect(state.calls[1].path).toBe('/car/v1/snapshots');
+  expect(state.calls[1].body.snapshots.map((s: VehicleSnapshot) => s.takenAt)).toEqual([1]);
+  expect(state.calls[1].body.sentAt).toBe(2_000_000 + MINUTE + 1234);
+
+  // alerts: the raise, its failed send and the resend from a later tick
+  state.reply = fail('server-error');
+  clock.t = 3_000_000;
+  uplink.sendAlerts([alert(1)]);
+  await settle();
+  expect(state.calls[2].body.sentAt).toBe(3_000_000);
+  state.reply = () => Promise.resolve(undefined);
+  clock.t = 3_000_000 + MINUTE;
+  uplink.onTick('awake');
+  await settle();
+  expect(state.calls[3].path).toBe('/car/v1/alerts');
+  expect(state.calls[3].body.alerts.map((a: AlertEvent) => a.id)).toEqual(['a1']);
+  expect(state.calls[3].body.sentAt).toBe(3_000_000 + MINUTE);
+});
+
+test('a question with the current snapshot sends it alone, first, on the same connection, and leaves the minute batch alone', async () => {
+  const turn = { id: 't1', at: 1, question: 'Стан авто', answer: 'Добре.', style: 'full', source: 'car', model: 'm', snapshotAt: null };
+  const { uplink, state, clock } = setup({ reply: (c) => Promise.resolve(c.path === '/car/v1/ask' ? { turn } : undefined) });
+  for (let i = 0; i < 70; i++) uplink.recordSnapshot(snap(i));     // a backlog: the newest is not what a batch would send
+  const live = snap(999);
+  clock.t = 5_000_000;
+  await expect(uplink.ask('Стан авто', 'full', live)).resolves.toEqual(turn);
+  expect(state.calls.map((c) => c.path)).toEqual(['/car/v1/snapshots', '/car/v1/ask']);
+  expect(state.calls[0].body).toEqual({ snapshots: [snap(999)], sentAt: 5_000_000 });
+  expect(state.calls[0].options?.longPoll === true).toBe(false);
+  expect(state.calls[1].body).toEqual({ text: 'Стан авто', style: 'full' });
+  // the backlog is untouched and the minute batch is still due
+  expect(uplink.queued().snapshots).toBe(70);
+  uplink.onTick('driving');
+  await settle();
+  expect(state.calls).toHaveLength(3);
+  expect(state.calls[2].body.snapshots[0].takenAt).toBe(0);
+  // without a snapshot only the question goes
+  await uplink.ask('Стан авто', 'spoken');
+  expect(state.calls.slice(3).map((c) => c.path)).toEqual(['/car/v1/ask']);
+});
+
+test('a failed or refused snapshot sent with a question does not stop the question, and blocks nothing', async () => {
+  const turn = { id: 't1', at: 1, question: 'q', answer: 'a', style: 'full', source: 'car', model: 'm', snapshotAt: null };
+  for (const kind of ['server-error', 'client-error'] as UplinkErrorKind[]) {
+    const { uplink, state } = setup({ reply: (c) => (c.path === '/car/v1/snapshots' ? fail(kind)() : Promise.resolve({ turn })) });
+    await expect(uplink.ask('q', 'full', snap(1))).resolves.toEqual(turn);
+    expect(state.calls.map((c) => c.path)).toEqual(['/car/v1/snapshots', '/car/v1/ask']);
+    uplink.sendAlerts([alert(1)]);
+    await settle();
+    expect(state.calls).toHaveLength(3);
+  }
+  // offline: no snapshot is attempted, the question fails as offline
+  const { uplink, state } = setup();
+  state.online = false;
+  await expect(uplink.ask('q', 'full', snap(1))).rejects.toMatchObject({ kind: 'offline' });
+  expect(state.calls.map((c) => c.path)).toEqual(['/car/v1/ask']);
+  // closed or unpaired: nothing at all
+  state.online = true;
+  uplink.close();
+  await expect(uplink.ask('q', 'full', snap(1))).rejects.toMatchObject({ kind: 'offline' });
+  const unpaired = setup({ device: null });
+  await expect(unpaired.uplink.ask('q', 'full', snap(1))).rejects.toBeInstanceOf(UplinkError);
+  expect(unpaired.state.calls).toHaveLength(0);
+});
+
+test('a snapshot batch the backend refuses is retried once, then dropped; alerts keep flowing; the drop is logged once', async () => {
+  const warnings: string[] = [];
+  const { http, state } = fakeHttp((c) => (c.path === '/car/v1/snapshots' ? fail('client-error')() : Promise.resolve(undefined)));
+  const clock = { t: 1_000_000, now() { return this.t; } };
+  const log: Log = { info() {}, warn: (m: string) => void warnings.push(m), error() {} };
+  const uplink = new UplinkClient({ http, device: () => ({ id: 'device-0001', secret: 'secret-0001' }), clock, log });
+  for (let i = 0; i < 3; i++) uplink.recordSnapshot(snap(i));
+  uplink.onTick('driving');
+  await settle();
+  expect(uplink.queued().snapshots).toBe(3);                    // kept for one retry
+  uplink.sendAlerts([alert(1)]);                                 // a raise still goes at once
+  await settle();
+  expect(state.calls.map((c) => c.path)).toEqual(['/car/v1/snapshots', '/car/v1/alerts']);
+  clock.t += MINUTE;
+  uplink.onTick('driving');
+  await settle();
+  expect(state.calls[2].body.snapshots.map((s: VehicleSnapshot) => s.takenAt)).toEqual([0, 1, 2]);
+  expect(uplink.queued().snapshots).toBe(0);                     // refused twice: dropped
+  // newer snapshots are sent as before, and a refusal of those is dropped the same way, logged no more
+  for (let m = 0; m < 6; m++) {
+    uplink.recordSnapshot(snap(10 + m));
+    clock.t += MINUTE;
+    uplink.onTick('driving');
+    uplink.sendAlerts([alert(10 + m)]);
+    await settle();
+  }
+  expect(state.calls.filter((c) => c.path === '/car/v1/alerts')).toHaveLength(7);
+  expect(uplink.queued().snapshots).toBeLessThanOrEqual(1);
+  expect(warnings.filter((w) => /dropped/.test(w))).toHaveLength(1);
+  expect(warnings.filter((w) => /^uplink: client-error \(\/car\/v1\/snapshots\)$/.test(w))).toHaveLength(1);
+  expect(warnings).toHaveLength(2);
+  expect(uplink.status()).toBe('ok');                            // the last request (an alert) was answered
+});
+
+test('the first failure of each kind is logged once per waking period, with the path and never the bearer', async () => {
+  const warnings: string[] = [];
+  const { http, state } = fakeHttp(fail('dns'));
+  const clock = { t: 1_000_000, now() { return this.t; } };
+  const log: Log = { info() {}, warn: (m: string) => void warnings.push(m), error() {} };
+  const uplink = new UplinkClient({ http, device: () => ({ id: 'device-0001', secret: 'secret-0001' }), clock, log });
+  for (let i = 0; i < 5; i++) {
+    await uplink.fetchConfig().catch(() => undefined);
+    await uplink.pollDialog('t-9').catch(() => undefined);
+  }
+  state.reply = fail('tls');
+  await uplink.ask('q', 'full').catch(() => undefined);
+  await uplink.ask('q', 'full').catch(() => undefined);
+  state.reply = fail('timeout');
+  uplink.sendAlerts([alert(1)]);
+  await settle();
+  state.reply = fail('server-error');
+  await uplink.fetchConfig().catch(() => undefined);
+  state.reply = fail('client-error');
+  await uplink.ask('q', 'full').catch(() => undefined);
+  expect(warnings).toEqual([
+    'uplink: dns (/car/v1/config)',
+    'uplink: tls (/car/v1/ask)',
+    'uplink: timeout (/car/v1/alerts)',
+    'uplink: server-error (/car/v1/config)',
+    'uplink: client-error (/car/v1/ask)',
+  ]);
+  for (const w of warnings) expect(w).not.toContain('secret');
+  // a new waking period logs the first of each kind again
+  uplink.close();
+  uplink.reopen();
+  state.reply = fail('dns');
+  await uplink.fetchConfig().catch(() => undefined);
+  await uplink.fetchConfig().catch(() => undefined);
+  expect(warnings.slice(5)).toEqual(['uplink: dns (/car/v1/config)']);
+});
+
+test('pendingAlerts() is a copy of the undelivered alerts, oldest first: a send in flight, then the queue', async () => {
+  let release: (v: unknown) => void = () => {};
+  const { uplink, state } = setup({ reply: () => new Promise((resolve) => (release = resolve)) });
+  state.online = false;
+  uplink.sendAlerts([alert(1)]);
+  uplink.queueAlerts([cleared(2)]);
+  const pending = uplink.pendingAlerts();
+  expect(pending.map((a) => [a.id, a.active])).toEqual([['a1', true], ['a2', false]]);
+  pending.length = 0;
+  expect(uplink.pendingAlerts()).toHaveLength(2);
+  state.online = true;
+  uplink.sendAlerts([alert(3)]);
+  expect(state.calls).toHaveLength(1);
+  // in flight is not yet delivered: a write made now must still carry it
+  uplink.queueAlerts([cleared(4)]);
+  expect(uplink.pendingAlerts().map((a) => [a.id, a.active])).toEqual([['a1', true], ['a2', false], ['a3', true], ['a4', false]]);
+  release(undefined);
+  await settle();
+  expect(uplink.pendingAlerts().map((a) => [a.id, a.active])).toEqual([['a4', false]]);
+});
+
+test('pendingAlerts() keeps an alert send in flight until it settles; a failed one is in it once, back in the queue', async () => {
+  let fail: (e: unknown) => void = () => {};
+  const { uplink, state } = setup({ reply: () => new Promise((_resolve, reject) => (fail = reject)) });
+  uplink.sendAlerts([alert(1)]);
+  uplink.queueAlerts([cleared(1)]);
+  expect(state.calls).toHaveLength(1);
+  expect(uplink.pendingAlerts().map((a) => [a.id, a.active])).toEqual([['a1', true], ['a1', false]]);
+  fail(new UplinkError('timeout', 'test'));
+  await settle();
+  expect(uplink.queued().alerts).toBe(2);
+  expect(uplink.pendingAlerts().map((a) => [a.id, a.active])).toEqual([['a1', true], ['a1', false]]);
+});
+
+test('pendingAlerts() holds at most ALERT_QUEUE_MAX, the newest, like the queue after a failed send', async () => {
+  let fail: (e: unknown) => void = () => {};
+  const { uplink } = setup({ reply: () => new Promise((_resolve, reject) => (fail = reject)) });
+  const raises: number[] = [];
+  for (let i = 1; i <= ALERT_QUEUE_MAX; i++) raises.push(i);
+  uplink.sendAlerts(raises.map((i) => alert(i)));           // all 20 in flight
+  uplink.queueAlerts([cleared(21), cleared(22)]);
+  const pending = uplink.pendingAlerts();
+  expect(pending).toHaveLength(ALERT_QUEUE_MAX);
+  expect(pending[0].id).toBe('a3');
+  expect(pending[ALERT_QUEUE_MAX - 1].id).toBe('a22');
+  fail(new UplinkError('timeout', 'test'));
+  await settle();
+  expect(uplink.pendingAlerts().map((a) => a.id)).toEqual(pending.map((a) => a.id));
 });

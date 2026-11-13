@@ -43,6 +43,13 @@ export class RingBuffer<T> {
     }
   }
 
+  /** A copy of what the buffer holds, oldest first; the buffer is left as it is. */
+  peek(): T[] {
+    const out: T[] = [];
+    for (let i = 0; i < this.count; i++) out.push(this.items[(this.head + i) % this.capacity] as T);
+    return out;
+  }
+
   size(): number {
     return this.count;
   }

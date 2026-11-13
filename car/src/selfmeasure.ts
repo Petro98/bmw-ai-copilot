@@ -22,8 +22,9 @@ function wholeMb(bytes: number): string {
 }
 
 /**
- * The next sample and, at most once per SELF_MEASURE_INTERVAL_MS, the line to log. The first call (prev null)
- * and a clock that went back only take a new baseline; between lines neither reader is called.
+ * The next sample and, at most once per SELF_MEASURE_INTERVAL_MS, the line to log. The first call (prev null),
+ * a clock that went back and a window longer than two intervals only take a new baseline; between lines neither
+ * reader is called.
  */
 export function measure(
   prev: Sample | null,
@@ -31,7 +32,9 @@ export function measure(
   mem: () => { rss: number; heapUsed: number },
   cpu: () => { user: number; system: number },
 ): { sample: Sample; line: string | null } {
-  if (prev === null || now < prev.at) {
+  // a window much longer than the interval spans time the app was not ticking (asleep) or a clock step: its
+  // average would hide what happened just before or after, so it only takes a new baseline
+  if (prev === null || now < prev.at || now - prev.at > 2 * SELF_MEASURE_INTERVAL_MS) {
     const c = cpu();
     return { sample: { at: now, user: c.user, system: c.system }, line: null };
   }

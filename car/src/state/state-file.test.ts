@@ -2,7 +2,7 @@ import { describe, expect, test } from 'vitest';
 import { NO_LIMITS } from '@copilot/event-engine';
 import type { FsApi } from '../platform';
 import type { Log } from '../safe';
-import { STATE_FILE_NAME, StateFile, defaultState, type PersistedState } from './state-file';
+import { MAX_PENDING_ALERTS, STATE_FILE_NAME, StateFile, defaultState, type PersistedState } from './state-file';
 
 const DIR = '/data/p98_copilot';
 const PATH = DIR + '/' + STATE_FILE_NAME;
@@ -123,17 +123,20 @@ describe('StateFile', () => {
     const fs = memFs();
     const log = memLog();
     const file = new StateFile({ dir: DIR + '/', fs, log });   // a trailing slash is not doubled
-    file.save(sample());
+    expect(file.save(sample())).toBe(true);
     expect(fs.calls).toEqual(['write ' + PATH + '.tmp', 'rename ' + PATH + '.tmp ' + PATH]);
     expect(fs.files[PATH].mode).toBe(0o600);
     expect(PATH + '.tmp' in fs.files).toBe(false);
 
+    // a failed save says so (the caller must not count it as saved)
     fs.failWrite = true;
     expect(() => file.save(sample())).not.toThrow();
+    expect(file.save(sample())).toBe(false);
     fs.failWrite = false;
     fs.failRename = true;
     expect(() => file.save(sample())).not.toThrow();
-    expect(log.lines.filter((l) => l.startsWith('warn')).length).toBe(2);
+    expect(file.save(sample())).toBe(false);
+    expect(log.lines.filter((l) => l.startsWith('warn')).length).toBe(4);
     expect(log.lines.join('\n')).toMatch(/ENOSPC/);
   });
 
@@ -157,8 +160,38 @@ describe('StateFile', () => {
     const file = new StateFile({ dir: DIR, fs, log });
     const circular: Record<string, unknown> = {};
     circular.self = circular;
-    expect(() => file.save({ ...sample(), engine: circular as never })).not.toThrow();
+    let saved: boolean | undefined;
+    expect(() => { saved = file.save({ ...sample(), engine: circular as never }); }).not.toThrow();
+    expect(saved).toBe(false);
     expect(fs.calls).toEqual([]);
     expect(log.lines.length).toBe(1);
+  });
+
+  test('alerts not yet sent round-trip, at most 20 and each checked; an older file without them loads unchanged', () => {
+    const fs = memFs();
+    const file = new StateFile({ dir: DIR, fs, log: memLog() });
+    const event = (n: number) => ({
+      id: 'cc:7:' + n, ruleId: 'check-control', dedupKey: 'cc:7', provenance: 'bmw-check-control' as const, severity: 'warning' as const,
+      title: 'Тиск у шинах', detail: null, at: 1000 + n, active: n % 2 === 0, clearedAt: n % 2 === 0 ? null : 2000 + n,
+    });
+    const withPending = { ...sample(), pendingAlerts: [event(0), event(1)] };
+    expect(file.save(withPending)).toBe(true);
+    expect(file.load()).toEqual(withPending);
+    expect(MAX_PENDING_ALERTS).toBe(20);
+
+    // too many: the newest 20 are kept; a damaged entry is skipped, the rest kept
+    const many = Array.from({ length: 30 }, (_, i) => event(i));
+    const damaged: unknown[] = [
+      { ...event(40), severity: 'loud' }, { ...event(41), id: 7 }, { ...event(42), at: 'now' }, { ...event(43), active: 'yes' },
+      { ...event(44), detail: 5 }, { ...event(45), clearedAt: '1' }, { ...event(46), provenance: 'elsewhere' }, null, 'x',
+      { ...event(47), title: 'x'.repeat(5000) },
+    ];
+    fs.files[PATH] = { data: JSON.stringify({ ...sample(), pendingAlerts: damaged.concat(many) }), mode: 0o600 };
+    const loaded = file.load();
+    expect(loaded.pendingAlerts!.map((a) => a.id)).toEqual(many.slice(10).map((a) => a.id));
+    fs.files[PATH] = { data: JSON.stringify({ ...sample(), pendingAlerts: 'nope' }), mode: 0o600 };
+    expect(file.load()).toEqual(sample());
+    fs.files[PATH] = { data: JSON.stringify({ ...sample(), pendingAlerts: [] }), mode: 0o600 };
+    expect(file.load()).toEqual(sample());
   });
 });

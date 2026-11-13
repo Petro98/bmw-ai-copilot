@@ -21,6 +21,7 @@ import {
   NOTE_TYRE_UNIT_UNKNOWN,
   PROVENANCE_TAG,
   SEVERITY_WORD,
+  TEXT_CLOCK,
   TEXT_TYRE_UNAVAILABLE,
   TEXT_UNAVAILABLE,
   TILE,
@@ -47,7 +48,8 @@ export interface ViewModel {
   assistant: { question: string | null; answer: string | null; pending: boolean; error: string | null; chips: string[]; strip: Tile[] };
   sensors: Tile[];                 // eight tiles in the mockup's order
   alerts: Array<{ title: string; tag: string; severity: Severity; active: boolean }>;
-  pairing: { paired: boolean; url: string | null };
+  /** `note`: a line shown in place of the pairing instructions (the wrong-clock line), or null. */
+  pairing: { paired: boolean; url: string | null; note: string | null };
   signature: string;               // changes exactly when something visible changes
 }
 
@@ -61,6 +63,8 @@ export interface ViewModelInput {
   tab: Tab;
   now: number;
   pairUrl: string | null;
+  /** The last request failed because the head unit's clock is wrong (no request has succeeded since). */
+  clockWrong?: boolean;
 }
 
 /** The alerts tab lists this many (four rows of the design's touch height fit the page; no scrolling). */
@@ -212,22 +216,24 @@ export function buildViewModel(input: ViewModelInput): ViewModel {
   const paired = input.link !== 'unpaired';
   const network = input.link === 'ok';
   const carFresh = snapshot !== null && now - snapshot.takenAt <= CAR_FRESH_MS && anyReading(snapshot);
-  const turn = input.pending || input.error ? null : input.lastTurn;
+  // a wrong clock is shown without a question being asked; a question's own error or a pending one comes first
+  const error = input.error !== null ? input.error : input.clockWrong === true && !input.pending ? TEXT_CLOCK : null;
+  const turn = input.pending || error ? null : input.lastTurn;
   const body = {
     tab: input.tab,
     moving,
-    status: { car: carFresh, network, claude: network && input.error === null },
+    status: { car: carFresh, network, claude: network && error === null },
     assistant: {
       question: turn ? turn.question : null,
       answer: turn ? turn.answer : null,
       pending: input.pending,
-      error: input.error,
+      error,
       chips: (moving ? CHIPS_MOVING : CHIPS_PARKED).slice(),
       strip: strip(snapshot, moving),
     },
     sensors: snapshot ? sensorTiles(snapshot, now) : emptyTiles(),
     alerts: alertRows(input.alerts, now),
-    pairing: { paired, url: paired ? null : input.pairUrl },
+    pairing: { paired, url: paired ? null : input.pairUrl, note: !paired && input.clockWrong === true ? TEXT_CLOCK : null },
   };
   return Object.assign(body, { signature: signatureOf(body) });
 }

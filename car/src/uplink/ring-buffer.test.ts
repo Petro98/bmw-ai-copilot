@@ -53,3 +53,14 @@ test('a capacity below one is treated as one', () => {
   buffer.push(2);
   expect(buffer.drain(5)).toEqual([2]);
 });
+
+test('peek() copies what the buffer holds, oldest first, without taking it', () => {
+  const buffer = new RingBuffer<number>(3);
+  expect(buffer.peek()).toEqual([]);
+  for (let i = 0; i < 5; i++) buffer.push(i);
+  const seen = buffer.peek();
+  expect(seen).toEqual([2, 3, 4]);
+  seen.length = 0;
+  expect(buffer.size()).toBe(3);
+  expect(buffer.drain(3)).toEqual([2, 3, 4]);
+});
