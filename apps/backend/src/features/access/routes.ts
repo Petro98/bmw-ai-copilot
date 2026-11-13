@@ -1,7 +1,8 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
+import type { ApiError } from '@copilot/shared';
 import type { RouteContext } from '../../http/app';
-import { HttpError } from '../../http/errors';
+import { HTTP_STATUS, HttpError, apiError } from '../../http/errors';
 import {
   LoginLimiter, SESSION_COOKIE, issueSessionValue, readCookie, sameSecret, sessionClearCookie, sessionSetCookie,
   verifySessionValue,
@@ -16,14 +17,9 @@ export const ACCESS_MESSAGES = {
   badLogin: 'Введіть ключ доступу.',
 } as const;
 
-/**
- * The body of a 401. `unauthorized` is not (yet) an ApiErrorCode in packages/shared (reported to the orchestrator as
- * a contract gap); clients act on the HTTP status.
- */
-export interface Unauthorized { error: { code: 'unauthorized'; message: string } }
-
-export function unauthorized(message: string): Unauthorized {
-  return { error: { code: 'unauthorized', message } };
+/** The body of a 401 (sent with HTTP_STATUS.unauthorized); clients act on the HTTP status. */
+export function unauthorized(message: string): ApiError {
+  return apiError('unauthorized', message);
 }
 
 /** Routes under /api that stay open with OWNER_TOKEN set (matched against the route pattern, not the raw URL). */
@@ -57,7 +53,7 @@ export function ownerAuthHook(ctx: Pick<RouteContext, 'config' | 'clock'>) {
     // An unmatched URL reaches the 404 handler, which reveals nothing.
     if (typeof route !== 'string' || !route.startsWith('/api/') || OPEN_API_ROUTES.has(route)) return undefined;
     if (hasOwnerSession(request, ctx)) return undefined;
-    return reply.code(401).send(unauthorized(ACCESS_MESSAGES.signIn));
+    return reply.code(HTTP_STATUS.unauthorized).send(unauthorized(ACCESS_MESSAGES.signIn));
   };
 }
 
@@ -78,7 +74,7 @@ export function accessRoutes(app: FastifyInstance, ctx: RouteContext): void {
     if (!sameSecret(parsed.data.token, ownerToken)) {
       limiter.recordFailure(address, now);
       request.log.info('owner sign-in refused');
-      return reply.code(401).send(unauthorized(ACCESS_MESSAGES.wrongToken));
+      return reply.code(HTTP_STATUS.unauthorized).send(unauthorized(ACCESS_MESSAGES.wrongToken));
     }
     limiter.reset(address);
     request.log.info('owner signed in');

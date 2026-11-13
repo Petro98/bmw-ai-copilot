@@ -12,11 +12,6 @@ export interface VehicleHubOptions {
 }
 
 const DEFAULT_SNAPSHOT_PUBLISH_INTERVAL_MS = 1000;
-/**
- * Recent alerts searched for the id of an incoming car alert (besides every active one). A clearing or re-opening
- * follows its raise within the rule's cooldown, so it is among them; an older id counts as new.
- */
-const KNOWN_ALERT_LOOKBACK = 200;
 const DAY_MS = 86_400_000;
 
 /** UTC day 'YYYY-MM-DD' of an epoch-millisecond time. */
@@ -95,27 +90,25 @@ export class VehicleHub {
 
   /**
    * An alert decided elsewhere (the car, Plan 2). The car reuses the id of the original raise when it clears or
-   * re-opens it, and a clearing it rebuilt after a restart has no content (severity 'info', empty title). So an
-   * unknown id is stored and published as received; for a known id only `active` and `clearedAt` are applied and the
-   * stored content is kept; a repeat that changes nothing is neither stored nor published. True when it changed.
+   * re-opens it, and a clearing it rebuilt after a restart has no content (severity 'info', empty title). So for a
+   * known id (looked up by id, however old) only `active` and `clearedAt` are applied and the stored content is kept,
+   * and a repeat that changes nothing is neither stored nor published. An unknown id is stored and published only as
+   * a raise with a title: a clearing for an alert never raised here, or a raise without a title, cannot be shown and
+   * is ignored (the car route already refuses a raise without a title). True when it changed.
    */
   ingestAlert(event: AlertEvent): boolean {
-    const stored = this.storedAlert(event.id);
+    const stored = this.options.alerts.get(event.id);
     let next = event;
     if (stored) {
       // Already in that state (a repeat, or a clearing rebuilt after a restart): the first clearing time stands.
       if (stored.active === event.active) return false;
       next = { ...stored, active: event.active, clearedAt: event.active ? null : event.clearedAt ?? this.options.clock.now() };
+    } else if (!event.active || event.title.trim() === '') {
+      return false;
     }
     this.options.alerts.upsert(next);
     this.options.bus.publish({ type: 'alert', alert: next });
     return true;
-  }
-
-  /** The stored alert with this id among the active ones and the most recent ones, or null. */
-  private storedAlert(id: string): AlertEvent | null {
-    const alerts = this.options.alerts;
-    return alerts.active().find((a) => a.id === id) ?? alerts.recent(KNOWN_ALERT_LOOKBACK).find((a) => a.id === id) ?? null;
   }
 
   private onChange(snapshot: VehicleSnapshot): void {

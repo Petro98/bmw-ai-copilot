@@ -16,7 +16,7 @@ export interface AskResponse { turn: DialogTurn }
 
 export type ApiErrorCode =
   | 'validation' | 'budget-exhausted' | 'rate-limited' | 'claude-unavailable'
-  | 'claude-refused' | 'not-found' | 'internal';
+  | 'claude-refused' | 'not-found' | 'internal' | 'unauthorized';
 
 export interface ApiError { error: { code: ApiErrorCode; message: string } }   // message: Ukrainian, safe to display
 

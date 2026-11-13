@@ -305,6 +305,48 @@ describe('VehicleHub', () => {
     expect(r.alertEvents()).toEqual([event, { ...event, active: false, clearedAt: 2000 }, event]);
   });
 
+  test('ingestAlert ignores what it cannot show: a clearing for an unknown id and a raise without a title', async () => {
+    r = rig({ engine: null });
+    await r.hub.start();
+    const raise: AlertEvent = {
+      id: 'owner-limit:oil:1000', ruleId: 'owner-limit', dedupKey: 'oil', provenance: 'owner-configured',
+      severity: 'warning', title: 'Температура масла вище вашого ліміту', detail: null,
+      at: 1000, active: true, clearedAt: null,
+    };
+    // A clearing a restarted car rebuilt for an alert whose raise it never uploaded.
+    expect(r.hub.ingestAlert({ ...raise, severity: 'info', title: '', active: false, clearedAt: 2000 })).toBe(false);
+    // A clearing with content for an unknown id is not stored either.
+    expect(r.hub.ingestAlert({ ...raise, active: false, clearedAt: 2000 })).toBe(false);
+    expect(r.hub.ingestAlert({ ...raise, title: '' })).toBe(false);
+    expect(r.hub.ingestAlert({ ...raise, title: '  ' })).toBe(false);
+    expect(r.alerts.recent(10)).toEqual([]);
+    expect(r.alertEvents()).toEqual([]);
+  });
+
+  test('ingestAlert knows an alert older than the 200 most recent ones', async () => {
+    r = rig({ engine: null });
+    await r.hub.start();
+    const old: AlertEvent = {
+      id: 'service:3:due-soon:1000', ruleId: 'service', dedupKey: 'service:3:due-soon', provenance: 'bmw-service',
+      severity: 'warning', title: 'Гальмівна рідина', detail: null, at: 1000, active: true, clearedAt: null,
+    };
+    expect(r.hub.ingestAlert(old)).toBe(true);
+    expect(r.hub.ingestAlert({ ...old, active: false, clearedAt: 2000 })).toBe(true);
+    for (let i = 0; i < 250; i++) {
+      r.alerts.upsert({ ...old, id: `cc:${i}:${10_000 + i}`, ruleId: 'check-control', dedupKey: `cc:${i}`, at: 10_000 + i, active: false, clearedAt: 20_000 });
+    }
+    expect(r.alerts.recent(200).some((a) => a.id === old.id)).toBe(false);
+    const published = r.alertEvents().length;
+
+    // A rebuilt clearing of the old, already cleared alert is a repeat: its empty content does not overwrite the row.
+    expect(r.hub.ingestAlert({ ...old, severity: 'info', title: '', active: false, clearedAt: 30_000 })).toBe(false);
+    expect(r.alerts.get(old.id)).toEqual({ ...old, active: false, clearedAt: 2000 });
+    // Re-opened under the old id: active again with the stored content, not the incoming one.
+    expect(r.hub.ingestAlert({ ...old, title: 'інше', at: 40_000 })).toBe(true);
+    expect(r.alerts.get(old.id)).toEqual(old);
+    expect(r.alertEvents().slice(published)).toEqual([old]);
+  });
+
   test('snapshot() is the provider snapshot and lastSnapshotAt is null before the first change', async () => {
     r = rig();
     expect(r.hub.lastSnapshotAt()).toBeNull();

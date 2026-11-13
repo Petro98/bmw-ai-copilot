@@ -29,6 +29,7 @@ export class AlertStore {
   private readonly upsertStatement: StatementSync;
   private readonly newest: StatementSync;
   private readonly activeStatement: StatementSync;
+  private readonly byId: StatementSync;
 
   constructor(db: DatabaseSync) {
     this.upsertStatement = db.prepare(
@@ -41,6 +42,14 @@ export class AlertStore {
     );
     this.newest = db.prepare('SELECT * FROM alert_events ORDER BY at DESC, rowid DESC LIMIT ?');
     this.activeStatement = db.prepare('SELECT * FROM alert_events WHERE active = 1 ORDER BY at DESC, rowid DESC');
+    // `id` is the table's primary key (migration 1), so this is a key search: no further index is needed.
+    this.byId = db.prepare('SELECT * FROM alert_events WHERE id = ?');
+  }
+
+  /** The event with this id, however old, or null. */
+  get(id: string): AlertEvent | null {
+    const row = this.byId.get(id);
+    return row ? toEvent(row) : null;
   }
 
   upsert(event: AlertEvent): void {

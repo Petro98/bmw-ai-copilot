@@ -11,7 +11,7 @@ import type {
 } from '@copilot/vehicle-core';
 import { AssistantError } from '../../assistant/assistant-service';
 import type { RouteContext } from '../../http/app';
-import { HttpError, MESSAGES } from '../../http/errors';
+import { HTTP_STATUS, HttpError, MESSAGES } from '../../http/errors';
 import { parseAskRequest } from '../../http/schemas';
 import type { DialogStore } from '../../stores/dialog-store';
 import { ACCESS_MESSAGES, unauthorized } from '../access/routes';
@@ -240,7 +240,12 @@ const alertSchema = z.object({
   at: time,
   active: z.boolean(),
   clearedAt: time.nullable(),
-});
+}).refine(
+  // A raise must be showable. Every car rule titles its raise with non-blank text (packages/event-engine/src/rules:
+  // a missing car text falls back to a named title), so this never refuses what the car sends. Only a clearing may
+  // be empty: one rebuilt after a restart (car/src/alerts/rule-runner.ts restoredClearing).
+  (alert) => !alert.active || alert.title.trim() !== '',
+);
 
 const alertBatchSchema = z.object({ alerts: z.array(alertSchema).max(MAX_ALERTS_PER_BATCH) });
 
@@ -326,7 +331,7 @@ export function carLinkRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const deviceId = bearer === null ? null : link.devices.verify(bearer);
     if (deviceId === null) {
       request.log.info('device request refused');
-      return reply.code(401).send(unauthorized(ACCESS_MESSAGES.deviceRefused));
+      return reply.code(HTTP_STATUS.unauthorized).send(unauthorized(ACCESS_MESSAGES.deviceRefused));
     }
     deviceOf.set(request, deviceId);
     try {

@@ -52,7 +52,8 @@ npm ci
 cp .env.example .env
 ```
 
-`.env.example` lists every variable with its default and a one-line explanation; every one is optional. `.env` is
+`.env.example` lists every variable with its default and a one-line explanation; every one is optional for a local
+run, and Docker Compose requires `OWNER_TOKEN` and `SESSION_SECRET` (see «Running with Docker Compose»). `.env` is
 git-ignored: never commit it. Docker Compose reads `.env` itself. The backend started with npm reads only its process
 environment and does not load `.env` by itself; export the file first when you want it:
 
@@ -91,16 +92,25 @@ npm start -w @copilot/backend
 
 ## Running with Docker Compose
 
+Inside its container the backend listens on `0.0.0.0`, and on a non-loopback `HOST` it refuses to start without
+`OWNER_TOKEN` and `SESSION_SECRET` (the API would be open). So Compose needs both, and stops with a message naming the
+missing one before it starts anything. Generate each value once and put it in `.env`:
+
 ```sh
+cp .env.example .env
+openssl rand -base64 32    # paste as OWNER_TOKEN=... in .env
+openssl rand -base64 32    # a second, different value: SESSION_SECRET=...
 docker compose up --build
 ```
 
-- Panel: http://localhost:8080 (nginx serves the build and proxies `/api` to the backend).
+- Panel: http://localhost:8080 (nginx serves the build and proxies `/api` to the backend). It opens «Вхід» first:
+  type the `OWNER_TOKEN` value once and the browser keeps the session for 30 days.
 - Backend: http://localhost:3000/api/health.
 
 Both ports are bound to 127.0.0.1 only. The backend runs as a non-root user; its database lives in the named volume
-`bmw-ai-copilot_copilot-data`, which `docker compose down` keeps and `docker compose down -v` deletes. `.env` is
-optional; inside the container `HOST`, `PORT` and `DATABASE_PATH` always come from `docker-compose.yml`.
+`bmw-ai-copilot_copilot-data`, which `docker compose down` keeps and `docker compose down -v` deletes. Every other
+variable in `.env` is optional; inside the container `HOST`, `PORT` and `DATABASE_PATH` always come from
+`docker-compose.yml`.
 
 ## Mock mode and live mode
 
@@ -123,8 +133,8 @@ never appears in an API response.
   characters) in `.env`. The panel then opens «Вхід» first; the token is typed once and the browser keeps an
   `HttpOnly`, `Secure`, `SameSite=Strict` session cookie for 30 days (`DELETE /api/session` ends it, a new
   `SESSION_SECRET` ends every session). Without `OWNER_TOKEN` the API is open, so the backend refuses to start unless
-  `HOST` is a loopback address; inside the Docker Compose container `HOST` is `0.0.0.0`, so Compose needs both
-  variables in `.env`. The cookie is `Secure`: serve the panel over HTTPS (browsers also accept it on
+  `HOST` is a loopback address; inside the Docker Compose container `HOST` is `0.0.0.0`, so Compose requires both
+  variables (see «Running with Docker Compose»). The cookie is `Secure`: serve the panel over HTTPS (browsers also accept it on
   `http://localhost`).
 - **Lock-out.** Five wrong tokens from one address within a minute lock that address out for a minute. The address
   is the TCP peer of the backend: behind a reverse proxy (nginx in Docker Compose included) every visitor shares the
@@ -189,7 +199,8 @@ numbers that do not occur in the data Claude was given.
 - Design language (colours, type, spacing, copy) and phone and head-unit mockups: [docs/design/README.md](docs/design/README.md),
   [docs/design/tokens.json](docs/design/tokens.json), [docs/design/mockups/](docs/design/mockups/)
 - Car documents: [docs/CAR_INSTALL.md](docs/CAR_INSTALL.md) (installing the head-unit app),
-  [docs/CAR_CHECKLIST.md](docs/CAR_CHECKLIST.md) (on-car checks), [car/kit/VENDORED.md](car/kit/VENDORED.md)
+  [docs/CAR_CHECKLIST.md](docs/CAR_CHECKLIST.md) (on-car checks),
+  [docs/VOICE_CAR_TEST.md](docs/VOICE_CAR_TEST.md) (trying voice in the car), [car/kit/VENDORED.md](car/kit/VENDORED.md)
   (the vendored MIT app kit and its local edits)
 
 ## Licence

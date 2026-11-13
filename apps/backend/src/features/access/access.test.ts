@@ -9,6 +9,7 @@ import { AssistantService } from '../../assistant/assistant-service';
 import { assistantConfigFrom, loadConfig, type Config } from '../../config';
 import { openDatabase } from '../../db/database';
 import { buildApp } from '../../http/app';
+import { HTTP_STATUS } from '../../http/errors';
 import { createLogger } from '../../logger';
 import { AlertStore } from '../../stores/alert-store';
 import { DialogStore } from '../../stores/dialog-store';
@@ -95,6 +96,7 @@ describe('owner access', () => {
     const refused = await app.inject({ method: 'GET', url: '/api/status' });
     expect(refused.statusCode).toBe(401);
     expect(refused.json()).toEqual({ error: { code: 'unauthorized', message: expect.any(String) } });
+    expect(HTTP_STATUS.unauthorized).toBe(401);
     for (const url of ['/api/snapshot', '/api/alerts', '/api/dialog', '/api/settings', '/api/devices', '/api/metrics']) {
       expect((await app.inject({ method: 'GET', url })).statusCode).toBe(401);
     }

@@ -301,15 +301,19 @@ describe('alerts from the car', () => {
     expect(alertEvents(r)).toEqual([raise()]);
   });
 
-  test('a clearing for an unknown id is stored as cleared without inventing content', async () => {
+  test('a clearing for an unknown id is accepted and ignored: nothing is stored or published', async () => {
     const r = await rig();
+    // Rebuilt by a restarted car for an alert whose raise it never uploaded.
     const clearing = raise({ severity: 'info', title: '', active: false, clearedAt: START + MINUTE });
-    await r.car('POST', 'alerts', { alerts: [clearing] });
-    expect(r.alerts.recent(10)).toEqual([clearing]);
-    expect(r.alerts.active()).toEqual([]);
+    expect((await r.car('POST', 'alerts', { alerts: [clearing] })).statusCode).toBe(204);
+    expect((await r.car('POST', 'alerts', { alerts: [raise({ active: false, clearedAt: START + MINUTE })] })).statusCode).toBe(204);
+    expect(r.alerts.recent(10)).toEqual([]);
+    expect(alertEvents(r)).toEqual([]);
   });
 
   test.each([
+    ['a raise with an empty title', { title: '' }],
+    ['a raise with a blank title', { title: '   ' }],
     ['an unknown severity', { severity: 'fatal' }],
     ['an unknown provenance', { provenance: 'claude' }],
     ['a title over 300 characters', { title: 'x'.repeat(301) }],

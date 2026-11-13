@@ -1,8 +1,10 @@
 # BMW AI Copilot: backend and phone panel.
-#   cp .env.example .env    (optional; without it every default applies: mock vehicle, mock Claude)
+#   cp .env.example .env    then set OWNER_TOKEN and SESSION_SECRET in it (each: openssl rand -base64 32)
 #   docker compose up --build
-# Panel: http://localhost:8080 (it proxies /api to the backend). Backend: http://localhost:3000/api/health.
+# Panel: http://localhost:8080 (it proxies /api and /car/v1 to the backend). Backend: http://localhost:3000/api/health.
 # Both ports are bound to 127.0.0.1 only. Nothing here talks to a vehicle.
+# The backend listens on 0.0.0.0 inside its container, and on a non-loopback HOST it refuses to start without
+# OWNER_TOKEN and SESSION_SECRET (an open API): Compose stops with a message when either is missing.
 name: bmw-ai-copilot
 
 services:
@@ -14,11 +16,13 @@ services:
       - path: .env
         required: false
     # These win over .env: inside the container the backend must listen on every interface and keep its
-    # database on the volume.
+    # database on the volume. The two secrets come from .env or the shell and are required (see the header).
     environment:
       HOST: 0.0.0.0
       PORT: "3000"
       DATABASE_PATH: /data/copilot.sqlite
+      OWNER_TOKEN: ${OWNER_TOKEN:?set OWNER_TOKEN in .env (openssl rand -base64 32); the container backend needs it}
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env (openssl rand -base64 32); the container backend needs it}
     volumes:
       - copilot-data:/data
     ports:

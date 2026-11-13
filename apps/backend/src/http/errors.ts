@@ -8,6 +8,7 @@ import { AssistantError } from '../assistant/assistant-service';
  */
 export const HTTP_STATUS: Readonly<Record<ApiErrorCode, number>> = {
   'validation': 400,
+  'unauthorized': 401,
   'budget-exhausted': 402,
   'not-found': 404,
   'claude-refused': 422,

@@ -91,6 +91,22 @@ describe('stores (in-memory database)', () => {
     expect(store.active()).toEqual([later]);
   });
 
+  test('get finds an alert by id, however many newer alerts there are', () => {
+    const store = new AlertStore(db);
+    const old = alert({ active: false, clearedAt: 2000 });
+    store.upsert(old);
+    for (let i = 0; i < 250; i++) store.upsert(alert({ id: `cc:${i}:${10_000 + i}`, at: 10_000 + i, active: false, clearedAt: 20_000 }));
+    expect(store.recent(200).some((e) => e.id === old.id)).toBe(false);
+    expect(store.get(old.id)).toEqual(old);
+    expect(store.get('cc:7:10007')).toEqual(alert({ id: 'cc:7:10007', at: 10_007, active: false, clearedAt: 20_000 }));
+    expect(store.get('unknown')).toBeNull();
+    expect(store.get('')).toBeNull();
+    // The id is the primary key: the lookup is a key search, not a table scan.
+    const plan = db.prepare('EXPLAIN QUERY PLAN SELECT * FROM alert_events WHERE id = ?').all('x')
+      .map((row) => String((row as { detail: unknown }).detail));
+    expect(plan.some((detail) => /USING (INDEX sqlite_autoindex_alert_events_1|PRIMARY KEY)/.test(detail))).toBe(true);
+  });
+
   test('a sample keeps only available readings', () => {
     expect(sampleFromSnapshot(emptySnapshot(5)).values).toEqual({});
     const snapshot = {
