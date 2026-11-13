@@ -12,6 +12,13 @@ import { parseAskRequest } from '../schemas';
  * The question text is never logged at info level: it is the owner's words.
  */
 export function askRoutes(app: FastifyInstance, ctx: RouteContext): void {
+  // Questions still waiting for Claude. Shutdown aborts them, so closing the server does not wait up to
+  // CLAUDE_TIMEOUT_MS for answers (the container's stop grace period is shorter).
+  const inFlight = new Set<AbortController>();
+  app.addHook('preClose', async () => {
+    for (const controller of Array.from(inFlight)) controller.abort();
+  });
+
   app.post('/api/ask', async (request, reply): Promise<AskResponse> => {
     const ask = parseAskRequest(request.body);
     const controller = new AbortController();
@@ -19,9 +26,14 @@ export function askRoutes(app: FastifyInstance, ctx: RouteContext): void {
     reply.raw.once('close', () => {
       if (!reply.raw.writableFinished) controller.abort();
     });
-    const turn = await ctx.assistant.ask(ask, undefined, controller.signal);
-    ctx.publishStatus();   // the spend changed
-    return { turn };
+    inFlight.add(controller);
+    try {
+      const turn = await ctx.assistant.ask(ask, undefined, controller.signal);
+      return { turn };
+    } finally {
+      inFlight.delete(controller);
+      ctx.publishStatus();   // the spend may have changed, also by a billed refusal
+    }
   });
 
   app.post('/api/ask/stream', async (request, reply) => {
@@ -29,6 +41,7 @@ export function askRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const ask = parseAskRequest(request.body);
     const stream = ctx.sse.open(reply, 'ask');
     const controller = new AbortController();
+    inFlight.add(controller);
     let finished = false;
     stream.onClose(() => {
       if (!finished) controller.abort();   // a client that disconnects aborts the Claude request
@@ -49,7 +62,6 @@ export function askRoutes(app: FastifyInstance, ctx: RouteContext): void {
       finished = true;
       if (splitter) sendSentences(splitter.flush());   // the rest of the answer, before done; never after an error
       send({ type: 'done', turn });
-      ctx.publishStatus();
     } catch (error) {
       finished = true;
       const { body, internal } = toApiError(error);
@@ -57,7 +69,9 @@ export function askRoutes(app: FastifyInstance, ctx: RouteContext): void {
       else request.log.info({ code: body.error.code }, 'streamed question refused');
       send({ type: 'error', error: body.error });
     } finally {
+      inFlight.delete(controller);
       stream.close();
+      ctx.publishStatus();   // the spend may have changed, also by a billed refusal
     }
   });
 }

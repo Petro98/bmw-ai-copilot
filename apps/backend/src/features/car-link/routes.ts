@@ -15,7 +15,7 @@ import { HTTP_STATUS, HttpError, MESSAGES } from '../../http/errors';
 import { parseAskRequest } from '../../http/schemas';
 import type { DialogStore } from '../../stores/dialog-store';
 import { ACCESS_MESSAGES, unauthorized } from '../access/routes';
-import type { CarLinkVehicleDataProvider } from './car-link-provider';
+import { clockOffset, shiftSnapshot, type CarLinkVehicleDataProvider } from './car-link-provider';
 import { DEVICE_ID_PATTERN, MAX_SECRET_CHARS, MIN_SECRET_CHARS, type DeviceStore } from './device-store';
 
 /** A long poll of GET /car/v1/dialog waits at most this long for a newer turn (packages/shared/src/car-dto.ts). */
@@ -46,12 +46,17 @@ const CAR_MESSAGES = {
   badDevice: 'Некоректні дані пристрою. Відскануйте QR-код на екрані авто ще раз.',
   badLabel: `Вкажіть назву пристрою: до ${MAX_LABEL_CHARS} символів.`,
   unknownDevice: 'Такого пристрою немає.',
+  mockSource: 'Сервер працює з демо-авто. Дані й питання від авто він приймає лише з VEHICLE_SOURCE=car.',
 } as const;
 
 /** What the car link needs besides the app's own dependencies. */
 export interface CarLinkDeps {
   devices: DeviceStore;
-  /** null unless VEHICLE_SOURCE=car: snapshots and alerts from a car are then accepted and dropped. */
+  /**
+   * null unless VEHICLE_SOURCE=car. Without it the car's snapshots, alerts, questions and dialog polls are refused with
+   * a 404 naming VEHICLE_SOURCE=car: a 4xx keeps the car's queue and darkens its network mark, so the car never shows
+   * answers from the mock vehicle and its data is not silently lost.
+   */
   provider: CarLinkVehicleDataProvider | null;
   /** The dialog store the assistant writes through, so a waiting poll hears of a new turn at once. */
   feed: DialogFeed;
@@ -63,11 +68,13 @@ export interface CarLinkDeps {
 /**
  * The assistant's dialog store with a notification on every `add` (in-process, no polling). Long polls subscribe
  * with `onAdd` and are removed when they end, so the listener set is bounded by the open polls.
+ * `historySince` is when the current vehicle source began (db/vehicle-source.ts): the assistant's history never
+ * includes an older turn, so answers about the mock vehicle are not given to Claude as the real car's, or the reverse.
  */
 export class DialogFeed implements Pick<DialogStore, 'add' | 'lastTurns'> {
   private readonly listeners = new Set<() => void>();
 
-  constructor(private readonly store: DialogStore) {}
+  constructor(private readonly store: DialogStore, private readonly historySince: number = Number.MIN_SAFE_INTEGER) {}
 
   add(turn: DialogTurn): void {
     this.store.add(turn);
@@ -80,8 +87,10 @@ export class DialogFeed implements Pick<DialogStore, 'add' | 'lastTurns'> {
     }
   }
 
-  lastTurns(n: number): DialogTurn[] {
-    return this.store.lastTurns(n);
+  /** The last `n` turns at or after both `historySince` and `since`, oldest first. */
+  lastTurns(n: number, since?: number): DialogTurn[] {
+    const from = typeof since === 'number' && Number.isFinite(since) ? Math.max(since, this.historySince) : this.historySince;
+    return this.store.lastTurns(n, from);
   }
 
   /**
@@ -227,7 +236,8 @@ const snapshotSchema = z.object({
   faultCodes: list(z.object({ ecu: text, code: text, text: text.nullable(), activeNow: z.boolean(), warningLamp: z.boolean() })),
 });
 
-const snapshotBatchSchema = z.object({ snapshots: z.array(snapshotSchema).max(MAX_SNAPSHOTS_PER_BATCH) });
+// `sentAt`: the car's clock at send time (packages/shared/src/car-dto.ts); optional, so an older car bundle still posts.
+const snapshotBatchSchema = z.object({ snapshots: z.array(snapshotSchema).max(MAX_SNAPSHOTS_PER_BATCH), sentAt: time.optional() });
 
 const alertSchema = z.object({
   id: z.string().min(1).max(1000),
@@ -247,7 +257,7 @@ const alertSchema = z.object({
   (alert) => !alert.active || alert.title.trim() !== '',
 );
 
-const alertBatchSchema = z.object({ alerts: z.array(alertSchema).max(MAX_ALERTS_PER_BATCH) });
+const alertBatchSchema = z.object({ alerts: z.array(alertSchema).max(MAX_ALERTS_PER_BATCH), sentAt: time.optional() });
 
 const dialogQuerySchema = z.object({ after: z.string().min(1).max(200).optional() });
 
@@ -257,19 +267,29 @@ const registrationSchema = z.object({
   label: z.string().trim().min(1).max(MAX_LABEL_CHARS),
 });
 
-/** Parsed snapshots: a malformed batch is one 400 and nothing of it is ingested. */
-export function parseSnapshotBatch(body: unknown): VehicleSnapshot[] {
+/**
+ * Parsed snapshots, with their times moved onto the backend's clock when the batch's `sentAt` shows the head-unit
+ * clock is off by more than CLOCK_TOLERANCE_MS (`receivedAt` is the backend's clock on arrival).
+ * A malformed batch is one 400 and nothing of it is ingested.
+ */
+export function parseSnapshotBatch(body: unknown, receivedAt: number): VehicleSnapshot[] {
   const result = snapshotBatchSchema.safeParse(body);
   if (!result.success) throw new HttpError('validation', CAR_MESSAGES.badCarData);
   const snapshots: VehicleSnapshot[] = result.data.snapshots;
-  return snapshots;
+  const offset = clockOffset(result.data.sentAt, receivedAt);
+  return offset === 0 ? snapshots : snapshots.map((snapshot) => shiftSnapshot(snapshot, offset));
 }
 
-export function parseAlertBatch(body: unknown): AlertEvent[] {
+/** Parsed alerts, `at` and `clearedAt` moved like the snapshots' times; the id (which holds the raise time) is kept. */
+export function parseAlertBatch(body: unknown, receivedAt: number): AlertEvent[] {
   const result = alertBatchSchema.safeParse(body);
   if (!result.success) throw new HttpError('validation', CAR_MESSAGES.badCarData);
   const alerts: AlertEvent[] = result.data.alerts;
-  return alerts;
+  const offset = clockOffset(result.data.sentAt, receivedAt);
+  if (offset === 0) return alerts;
+  return alerts.map((alert) => ({
+    ...alert, at: alert.at + offset, clearedAt: alert.clearedAt === null ? null : alert.clearedAt + offset,
+  }));
 }
 
 /* ---------- routes ---------- */
@@ -293,9 +313,12 @@ export function carLinkRoutes(app: FastifyInstance, ctx: RouteContext): void {
   const waiters = new DialogWaiters(link.feed, link.dialogWaitMs ?? DIALOG_WAIT_MS);
   const deviceOf = new WeakMap<FastifyRequest, string>();
   let offlineTimer: ReturnType<typeof setTimeout> | null = null;
+  // Car questions still waiting for Claude; shutdown aborts them rather than wait up to CLAUDE_TIMEOUT_MS.
+  const inFlight = new Set<AbortController>();
 
   app.addHook('preClose', async () => {
     waiters.releaseAll();
+    for (const controller of Array.from(inFlight)) controller.abort();
     if (offlineTimer) clearTimeout(offlineTimer);
     offlineTimer = null;
   });
@@ -320,7 +343,10 @@ export function carLinkRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const id = request.params.id;
     if (!link.devices.remove(id)) throw new HttpError('not-found', CAR_MESSAGES.unknownDevice);
     waiters.releaseDevice(id);
-    request.log.info({ deviceId: id }, 'device removed');
+    // Car mode: the alerts came from the car, and a clearing it never delivered cannot arrive any more. Not done on
+    // re-registration (POST /api/devices), which also runs when the owner re-scans the QR of the same running car.
+    const cleared = link.provider ? ctx.hub.clearActiveAlerts() : 0;
+    request.log.info({ deviceId: id, alertsCleared: cleared }, 'device removed');
     return reply.code(204).send();
   });
 
@@ -341,11 +367,22 @@ export function carLinkRoutes(app: FastifyInstance, ctx: RouteContext): void {
     }
     return undefined;
   };
+  // Runs after `authenticate`: an unknown device still gets its 401 first.
+  let warnedMockSource = false;
+  const carSourceOnly = async (request: FastifyRequest): Promise<void> => {
+    if (link.provider) return;
+    if (!warnedMockSource) {
+      warnedMockSource = true;
+      request.log.warn('a paired car is calling but VEHICLE_SOURCE is not car: its data and questions are refused');
+    }
+    throw new HttpError('not-found', CAR_MESSAGES.mockSource);
+  };
   const device = { onRequest: authenticate };
-  const carBody = { onRequest: authenticate, bodyLimit: CAR_BODY_LIMIT_BYTES };
+  const carData = { onRequest: [authenticate, carSourceOnly] };
+  const carBody = { onRequest: [authenticate, carSourceOnly], bodyLimit: CAR_BODY_LIMIT_BYTES };
 
   app.post(`${CAR_API_PREFIX}/snapshots`, carBody, async (request, reply) => {
-    const snapshots = parseSnapshotBatch(request.body);
+    const snapshots = parseSnapshotBatch(request.body, ctx.clock.now());
     const provider = link.provider;
     if (provider && snapshots.length > 0) {
       const wasConnected = provider.connected();
@@ -363,13 +400,12 @@ export function carLinkRoutes(app: FastifyInstance, ctx: RouteContext): void {
   });
 
   app.post(`${CAR_API_PREFIX}/alerts`, carBody, async (request, reply) => {
-    const alerts = parseAlertBatch(request.body);
-    // With the mock vehicle the car's alerts have no place; they are accepted and dropped.
-    if (link.provider) for (const alert of alerts) ctx.hub.ingestAlert(alert);
+    const alerts = parseAlertBatch(request.body, ctx.clock.now());
+    for (const alert of alerts) ctx.hub.ingestAlert(alert);   // carSourceOnly: only with the car as vehicle source
     return reply.code(204).send();
   });
 
-  app.post(`${CAR_API_PREFIX}/ask`, device, async (request, reply): Promise<{ turn: DialogTurn }> => {
+  app.post(`${CAR_API_PREFIX}/ask`, carData, async (request, reply): Promise<{ turn: DialogTurn }> => {
     const parsed = parseAskRequest(request.body);
     const ask = { text: parsed.text, style: parsed.style ?? 'full', source: 'car' as const };
     const controller = new AbortController();
@@ -384,18 +420,20 @@ export function carLinkRoutes(app: FastifyInstance, ctx: RouteContext): void {
         reject(new AssistantError('claude-unavailable', userMessageFor('timeout')));
       }, ctx.config.claudeTimeoutMs);
     });
+    inFlight.add(controller);
     const answer = ctx.assistant.ask(ask, undefined, controller.signal);
     answer.catch(() => undefined);   // after a timeout its rejection has no reader
     try {
       const turn = await Promise.race([answer, timeout]);
       return { turn };
     } finally {
+      inFlight.delete(controller);
       clearTimeout(timer);
       ctx.publishStatus();   // the spend may have changed
     }
   });
 
-  app.get(`${CAR_API_PREFIX}/dialog`, device, async (request, reply): Promise<CarDialogResponse> => {
+  app.get(`${CAR_API_PREFIX}/dialog`, carData, async (request, reply): Promise<CarDialogResponse> => {
     const query = dialogQuerySchema.safeParse(request.query ?? {});
     if (!query.success) throw new HttpError('validation', MESSAGES.invalidRequest);
     const after = query.data.after ?? null;

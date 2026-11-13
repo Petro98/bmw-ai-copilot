@@ -24,12 +24,20 @@ function toEvent(row: Row): AlertEvent {
   };
 }
 
+/**
+ * Cleared events kept; the oldest beyond this are deleted as events are stored. Active events are never deleted here
+ * (the panel lists the newest 50).
+ */
+export const MAX_CLEARED_ALERTS = 1000;
+
 /** Alert events. The engine reports a raise and its later clear under the same id; the row holds the latest state. */
 export class AlertStore {
   private readonly upsertStatement: StatementSync;
   private readonly newest: StatementSync;
   private readonly activeStatement: StatementSync;
   private readonly byId: StatementSync;
+  private readonly clearActiveStatement: StatementSync;
+  private readonly prune: StatementSync;
 
   constructor(db: DatabaseSync) {
     this.upsertStatement = db.prepare(
@@ -44,6 +52,11 @@ export class AlertStore {
     this.activeStatement = db.prepare('SELECT * FROM alert_events WHERE active = 1 ORDER BY at DESC, rowid DESC');
     // `id` is the table's primary key (migration 1), so this is a key search: no further index is needed.
     this.byId = db.prepare('SELECT * FROM alert_events WHERE id = ?');
+    this.clearActiveStatement = db.prepare('UPDATE alert_events SET active = 0, cleared_at = ? WHERE active = 1 RETURNING *');
+    this.prune = db.prepare(
+      `DELETE FROM alert_events WHERE rowid IN
+         (SELECT rowid FROM alert_events WHERE active = 0 ORDER BY at DESC, rowid DESC LIMIT -1 OFFSET ${MAX_CLEARED_ALERTS})`,
+    );
   }
 
   /** The event with this id, however old, or null. */
@@ -57,6 +70,12 @@ export class AlertStore {
       event.id, event.ruleId, event.dedupKey, event.provenance, event.severity, event.title, event.detail,
       event.at, event.active ? 1 : 0, event.clearedAt,
     );
+    this.prune.run();
+  }
+
+  /** Clears every active event at `now` and returns them as cleared, newest first. */
+  clearActive(now: number): AlertEvent[] {
+    return this.clearActiveStatement.all(now).map(toEvent).sort((a, b) => b.at - a.at);
   }
 
   /** Newest first. */

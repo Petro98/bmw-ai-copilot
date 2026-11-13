@@ -1,5 +1,5 @@
 import cors from '@fastify/cors';
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify';
 import type { CostGuard } from '@copilot/ai-core';
 import type { StatusDto } from '@copilot/shared';
 import type { Clock, MockVehicleDataProvider } from '@copilot/vehicle-core';
@@ -13,7 +13,7 @@ import type { DialogStore } from '../stores/dialog-store';
 import type { SettingsStore } from '../stores/settings-store';
 import type { LiveBus } from '../vehicle/live-bus';
 import type { VehicleHub } from '../vehicle/vehicle-hub';
-import { MESSAGES, apiError, toApiError } from './errors';
+import { HTTP_STATUS, MESSAGES, apiError, toApiError } from './errors';
 import { askRoutes } from './routes/ask';
 import { dialogRoutes } from './routes/dialog';
 import { eventsRoutes } from './routes/events';
@@ -85,6 +85,12 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     bodyLimit: BODY_LIMIT_BYTES,
     // The id comes from the server only; a client-sent request-id header is not trusted or echoed.
     requestIdHeader: false,
+    // Router errors (a malformed percent-encoding, an over-long path parameter) bypass the error handler; without
+    // this they leave in Fastify's own shape with the request URL in the message.
+    frameworkErrors: (_error, request, reply) => {
+      request.log.info('request refused by the router');
+      void (reply as FastifyReply).code(HTTP_STATUS.validation).send(apiError('validation', MESSAGES.invalidRequest));
+    },
     // The pino Logger type parameter makes the instance a different generic type; route modules use the default one.
   }) as unknown as FastifyInstance;
 
@@ -103,7 +109,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   };
 
   // The plugin's default methods are GET,HEAD,POST; PUT /api/settings needs PUT in the preflight answer.
-  void app.register(cors, { origin: deps.config.corsOrigin, methods: ['GET', 'HEAD', 'POST', 'PUT'] });
+  // strictPreflight off: a bare OPTIONS gets the plain preflight answer (204, no body) instead of a text/plain 400.
+  void app.register(cors, { origin: deps.config.corsOrigin, methods: ['GET', 'HEAD', 'POST', 'PUT'], strictPreflight: false });
 
   // Owner access: with OWNER_TOKEN set, /api routes (but health and session) need the session cookie.
   app.addHook('onRequest', ownerAuthHook(ctx));

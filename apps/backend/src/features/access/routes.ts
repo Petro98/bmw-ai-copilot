@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { ApiError } from '@copilot/shared';
 import type { RouteContext } from '../../http/app';
-import { HTTP_STATUS, HttpError, apiError } from '../../http/errors';
+import { HTTP_STATUS, HttpError, MESSAGES, apiError } from '../../http/errors';
 import {
   LoginLimiter, SESSION_COOKIE, issueSessionValue, readCookie, sameSecret, sessionClearCookie, sessionSetCookie,
   verifySessionValue,
@@ -33,6 +33,19 @@ function remoteAddress(request: FastifyRequest): string {
   return request.socket?.remoteAddress ?? 'unknown';
 }
 
+/**
+ * True when the Host header names this machine: localhost, 127.x.x.x or [::1], with an optional port.
+ * Without OWNER_TOKEN this is what keeps a web page whose name was re-pointed at 127.0.0.1 (DNS rebinding) away from
+ * the open API: the browser sends that page's own name as Host.
+ */
+export function isLoopbackHostHeader(host: string | undefined): boolean {
+  if (typeof host !== 'string') return false;
+  const match = /^(\[::1\]|[^:[\]]+)(:\d{1,5})?$/.exec(host.trim());
+  if (!match) return false;
+  const name = match[1].toLowerCase();
+  return name === 'localhost' || name === '[::1]' || /^127(\.\d{1,3}){3}$/.test(name);
+}
+
 /** True when the request carries a valid owner session cookie. */
 export function hasOwnerSession(request: FastifyRequest, ctx: Pick<RouteContext, 'config' | 'clock'>): boolean {
   const secret = ctx.config.sessionSecret;
@@ -43,12 +56,17 @@ export function hasOwnerSession(request: FastifyRequest, ctx: Pick<RouteContext,
 
 /**
  * The one owner-access hook (onRequest). With OWNER_TOKEN set, every /api route except /api/health and /api/session
- * needs the session cookie; without it the API is open (config.ts then allows only a loopback HOST).
- * /car/v1 routes authenticate devices themselves (car-link/routes.ts).
+ * needs the session cookie; without it the API is open (config.ts then allows only a loopback HOST) and every request
+ * must name a loopback host in its Host header. /car/v1 routes authenticate devices themselves (car-link/routes.ts).
  */
 export function ownerAuthHook(ctx: Pick<RouteContext, 'config' | 'clock'>) {
   return async (request: FastifyRequest, reply: FastifyReply): Promise<FastifyReply | undefined> => {
-    if (!ctx.config.ownerToken || request.method === 'OPTIONS') return undefined;
+    if (!ctx.config.ownerToken) {
+      if (isLoopbackHostHeader(request.headers.host)) return undefined;
+      request.log.info('request with a non-loopback Host refused (open API)');
+      return reply.code(HTTP_STATUS.validation).send(apiError('validation', MESSAGES.invalidRequest));
+    }
+    if (request.method === 'OPTIONS') return undefined;
     const route = request.routeOptions.url;
     // An unmatched URL reaches the 404 handler, which reveals nothing.
     if (typeof route !== 'string' || !route.startsWith('/api/') || OPEN_API_ROUTES.has(route)) return undefined;

@@ -28,6 +28,50 @@ function capTyres(set: TyreSet<Reading<number>>, limit: number): TyreSet<Reading
 }
 
 /**
+ * A difference between the car's clock at send time (`sentAt`) and the backend's clock on arrival up to this size is
+ * network latency or a held request, not a wrong clock, and is left alone.
+ */
+export const CLOCK_TOLERANCE_MS = 120_000;
+
+/**
+ * How far the head-unit clock is behind the backend's (negative: ahead), from the car's own clock at send time.
+ * 0 when the batch carries no `sentAt` (an older car bundle) or the difference is within CLOCK_TOLERANCE_MS.
+ * The head unit's clock can be days off (spec section 4) and is checked on the car only through certificate dates.
+ */
+export function clockOffset(sentAt: number | undefined, receivedAt: number): number {
+  if (typeof sentAt !== 'number' || !Number.isFinite(sentAt)) return 0;
+  const offset = receivedAt - sentAt;
+  return Math.abs(offset) <= CLOCK_TOLERANCE_MS ? 0 : offset;
+}
+
+function shiftReading<T>(reading: Reading<T>, offset: number): Reading<T> {
+  return reading.available ? { ...reading, at: reading.at + offset } : reading;
+}
+
+/** The snapshot with `takenAt`, every available reading's `at` and each Check Control `since` moved by `offset`. */
+export function shiftSnapshot(snapshot: VehicleSnapshot, offset: number): VehicleSnapshot {
+  if (offset === 0) return snapshot;
+  const out = { ...snapshot, takenAt: snapshot.takenAt + offset } as Record<string, unknown>;
+  for (const key of Object.keys(snapshot) as Array<keyof VehicleSnapshot>) {
+    if (key === 'takenAt') continue;
+    if (isTyreSet(key)) {
+      const set = snapshot[key] as TyreSet<Reading<number>>;
+      out[key] = {
+        frontLeft: shiftReading(set.frontLeft, offset), frontRight: shiftReading(set.frontRight, offset),
+        rearLeft: shiftReading(set.rearLeft, offset), rearRight: shiftReading(set.rearRight, offset),
+      };
+    } else {
+      out[key] = shiftReading(snapshot[key] as Reading<unknown>, offset);
+    }
+  }
+  const cc = snapshot.checkControl;
+  if (cc.available) {
+    out.checkControl = { ...cc, at: cc.at + offset, value: cc.value.map((message) => ({ ...message, since: message.since + offset })) };
+  }
+  return out as unknown as VehicleSnapshot;
+}
+
+/**
  * Times are kept as the car sent them (an offline car's readings age by their real `at`), except that nothing may lie
  * in the future of the moment the backend received it: otherwise a car clock running ahead would keep readings
  * looking fresh after the car went quiet.

@@ -2,7 +2,10 @@ import type { FastifyReply } from 'fastify';
 
 /** A comment line goes out this often so proxies and browsers keep an idle stream open. */
 export const SSE_KEEP_ALIVE_MS = 25_000;
-/** A client this far behind (unsent bytes) is dropped instead of growing the process without bound. */
+/**
+ * A client this far behind (unsent bytes) is dropped instead of growing the process without bound. Its socket is
+ * destroyed: an ordinary end would queue behind the unsent data and keep the socket open until TCP gives up.
+ */
 const MAX_BUFFERED_BYTES = 1024 * 1024;
 
 export interface SseStream {
@@ -57,7 +60,12 @@ export class SseRegistry {
     const write = (chunk: string): void => {
       if (closed) return;
       if (raw.writableLength > MAX_BUFFERED_BYTES) {
-        stream.close();
+        try {
+          raw.destroy();
+        } catch {
+          // Already gone.
+        }
+        finish();
         return;
       }
       try {

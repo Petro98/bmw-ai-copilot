@@ -111,6 +111,20 @@ export class VehicleHub {
     return true;
   }
 
+  /**
+   * Clears every stored active alert now and publishes each clearing. For alerts the car reported (no engine here):
+   * when the owner removes the device, a clearing it never delivered can no longer arrive. A car that is still
+   * running re-opens its real alerts on its next start under the same ids. Returns the number cleared.
+   */
+  clearActiveAlerts(): number {
+    const cleared = this.options.alerts.clearActive(this.options.clock.now());
+    for (const alert of cleared) {
+      this.storedActive.delete(alert.id);
+      this.options.bus.publish({ type: 'alert', alert });
+    }
+    return cleared.length;
+  }
+
   private onChange(snapshot: VehicleSnapshot): void {
     const now = this.options.clock.now();
     this.lastSeenAt = snapshot.takenAt;

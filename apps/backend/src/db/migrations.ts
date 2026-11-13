@@ -96,6 +96,20 @@ export const MIGRATIONS: readonly string[] = [
     last_seen_at INTEGER
   );
   `,
+  // 4: which vehicle source (mock or car) the vehicle data in this file belongs to, and since when (db/vehicle-source.ts).
+  // Before this migration the mock was the default source, so a database that already holds alerts or telemetry is
+  // recorded as mock since 0: a first start with VEHICLE_SOURCE=car then resets its demo data.
+  `
+  CREATE TABLE vehicle_source (
+    id     INTEGER PRIMARY KEY CHECK (id = 1),
+    source TEXT NOT NULL,
+    since  INTEGER NOT NULL
+  );
+  INSERT INTO vehicle_source (id, source, since)
+    SELECT 1, 'mock', 0
+    WHERE EXISTS (SELECT 1 FROM alert_events) OR EXISTS (SELECT 1 FROM telemetry_samples)
+       OR EXISTS (SELECT 1 FROM telemetry_daily);
+  `,
 ];
 
 /** Applies every migration the database has not seen yet. Safe to call any number of times. */

@@ -1,9 +1,10 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { request as httpRequest, type ClientRequest, type IncomingMessage } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync } from 'node:sqlite';
+import { Writable } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { ClaudeError, CostGuard, MockClaudeGateway, type ClaudeGateway } from '@copilot/ai-core';
@@ -13,6 +14,8 @@ import { MockVehicleDataProvider, type TimerApi, type VehicleSnapshot } from '@c
 import { AssistantService } from '../assistant/assistant-service';
 import { assistantConfigFrom, loadConfig, type Config } from '../config';
 import { openDatabase } from '../db/database';
+import { MIGRATIONS } from '../db/migrations';
+import { DialogFeed } from '../features/car-link/routes';
 import { createLogger } from '../logger';
 import { isEntryPath, start } from '../main';
 import { AlertStore } from '../stores/alert-store';
@@ -23,6 +26,7 @@ import { SqliteUsageStore } from '../stores/usage-store';
 import { LiveBus } from '../vehicle/live-bus';
 import { VehicleHub } from '../vehicle/vehicle-hub';
 import { buildApp } from './app';
+import { MAX_EVENT_STREAMS } from './routes/events';
 
 const SECOND = 1000;
 const START = Date.UTC(2026, 10, 13, 10, 0, 0);   // 2026-11-13T10:00:00Z
@@ -240,6 +244,8 @@ describe('HTTP API', () => {
       { ...SETTINGS, ownerLimits: { ...SETTINGS.ownerLimits, tyrePressureDeviationBar: 0.01 } },
       { ...SETTINGS, popupsEnabled: 'yes' },
       { ownerLimits: SETTINGS.ownerLimits },
+      // Diagnostics stay off until the owner approves the check in the car (the panel's switch is disabled).
+      { ...SETTINGS, diagnosticsEnabled: true },
     ];
     for (const payload of bad) {
       const response = await app.inject({ method: 'PUT', url: '/api/settings', payload: payload as object });
@@ -365,6 +371,39 @@ describe('HTTP API', () => {
     expect(dialog.recent(5)).toEqual([]);
   });
 
+  test('a billed refusal still publishes a status event, so the panel shows the new spend', async () => {
+    const billed = [{ model: 'claude-opus-5-5', usage: { inputTokens: 1000, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 } }];
+    const gateway: ClaudeGateway = { ask: async () => { throw new ClaudeError('refusal', 'x', false, billed); } };
+    const { app, events } = await rig({ gateway });
+    const statuses = (): number => events.filter((event) => event.type === 'status').length;
+    expect((await app.inject({ method: 'POST', url: '/api/ask', payload: { text: 'Як справи?' } })).statusCode).toBe(422);
+    expect(statuses()).toBe(1);
+    await app.inject({ method: 'POST', url: '/api/ask/stream', payload: { text: 'Як справи?' } });
+    expect(statuses()).toBe(2);
+  });
+
+  test('closing the app aborts a question still waiting for Claude', async () => {
+    const gateway: ClaudeGateway = {
+      ask: (_prompt, options) => new Promise((_resolve, reject) => {
+        options.signal?.addEventListener('abort', () => reject(new ClaudeError('timeout', 'aborted', true)));
+      }),
+    };
+    const { app } = await rig({ gateway });
+    const pending = app.inject({ method: 'POST', url: '/api/ask', payload: { text: 'Як справи?' } });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const began = Date.now();
+    await app.close();
+    expect(Date.now() - began).toBeLessThan(1000);
+    expect((await pending).statusCode).toBe(503);
+  });
+
+  test('a bare OPTIONS request gets no plain-text error body', async () => {
+    const { app } = await rig();
+    const response = await app.inject({ method: 'OPTIONS', url: '/api/status' });
+    expect(response.statusCode).toBeLessThan(400);
+    expect(response.body).toBe('');
+  });
+
   test('an unexpected exception is a 500 ApiError with code internal and no stack trace or secret in the body', async () => {
     const { app, dialog } = await rig();
     vi.spyOn(dialog, 'recent').mockImplementation(() => {
@@ -456,6 +495,25 @@ describe('live events stream', () => {
     expect(after.json<MetricsDto>().sseClients).toBe(0);
   });
 
+  test(`at most ${MAX_EVENT_STREAMS} event streams are open at once; a further one is a 429 ApiError`, async () => {
+    const { app } = await rig();
+    await app.listen({ port: 0, host: '127.0.0.1' });
+    const port = (app.server.address() as AddressInfo).port;
+    const clients = Array.from({ length: MAX_EVENT_STREAMS }, () => connect(port, '/api/events'));
+    for (const client of clients) expect((await client.response).statusCode).toBe(200);
+    const refused = connect(port, '/api/events');
+    const res = await refused.response;
+    expect(res.statusCode).toBe(429);
+    await vi.waitFor(() => expect(refused.text()).not.toBe(''));
+    expectApiError(JSON.parse(refused.text()), 'rate-limited');
+    // A closed stream makes room again.
+    clients[0].request.destroy();
+    await vi.waitFor(async () => expect((await app.inject({ method: 'GET', url: '/api/metrics' })).json<MetricsDto>().sseClients).toBe(MAX_EVENT_STREAMS - 1));
+    const next = connect(port, '/api/events');
+    expect((await next.response).statusCode).toBe(200);
+    for (const client of [...clients, next]) client.request.destroy();
+  });
+
   test('closing the app ends open event streams', async () => {
     const { app, bus } = await rig();
     await app.listen({ port: 0, host: '127.0.0.1' });
@@ -493,6 +551,82 @@ describe('process lifecycle', () => {
     expect(intervals).toBe(0);                        // the hub stopped the provider
     expect(existsSync(`${databasePath}-wal`)).toBe(false);  // the last connection closed and checkpointed
     await handle.close();                             // a second close is harmless
+  });
+
+  test('switching the vehicle source on one database resets the vehicle data, keeps the rest and warns once', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'copilot-backend-'));
+    const databasePath = join(dir, 'data', 'copilot.sqlite');
+    const lines: string[] = [];
+    const logDestination = new Writable({ write(chunk, _encoding, done) { lines.push(String(chunk)); done(); } });
+    const warnings = (): string[] => lines.map((line) => JSON.parse(line) as { level: number; msg: string })
+      .filter((line) => line.level === 40).map((line) => line.msg);
+    const env = { DATABASE_PATH: databasePath, PORT: '0', LOG_LEVEL: 'warn' };
+
+    const demo = await start(env, { clock: { now: () => START }, timers: NO_TIMERS, logDestination });
+    await demo.close();
+    expect(statSync(join(dir, 'data')).mode & 0o777).toBe(0o700);
+    // What a demo run leaves: an active alert, telemetry, a dialog turn; and what the owner set up.
+    let db = openDatabase(databasePath);
+    new AlertStore(db).upsert({
+      id: 'service:x:1', ruleId: 'service', dedupKey: 'x', provenance: 'bmw-service', severity: 'warning',
+      title: 'Гальмівна рідина: через 3 місяці', detail: null, at: START, active: true, clearedAt: null,
+    });
+    const telemetry = new TelemetryStore(db);
+    telemetry.addSample({ at: START, values: { odometer: 48210 } });
+    telemetry.rollUpDay('2026-11-13');
+    new DialogStore(db).add({
+      id: 'demo', at: START + SECOND, question: 'Як авто?', answer: 'Демо-режим без Claude.', style: 'full', source: 'panel',
+      model: 'mock', snapshotAt: null,
+    });
+    new SettingsStore(db).set({ ...SETTINGS, ownerLimits: { ...SETTINGS.ownerLimits, oilTempMaxC: 130 } });
+    db.close();
+    expect(warnings()).toEqual([]);
+
+    const later = START + 60 * 60 * SECOND;
+    const car = await start({ ...env, VEHICLE_SOURCE: 'car' }, { clock: { now: () => later }, logDestination });
+    await car.close();
+    expect(warnings()).toEqual([expect.stringContaining('vehicle source changed')]);
+
+    db = openDatabase(databasePath);
+    try {
+      expect(new AlertStore(db).active()).toEqual([]);
+      expect(new TelemetryStore(db).dailySummaries(30)).toEqual([]);
+      expect(db.prepare('SELECT source, since FROM vehicle_source').all()).toEqual([{ source: 'car', since: later }]);
+      const dialog = new DialogStore(db);
+      expect(dialog.recent(5).map((t) => t.id)).toEqual(['demo']);
+      expect(new DialogFeed(dialog, later).lastTurns(4)).toEqual([]);
+      expect(new SettingsStore(db).get().ownerLimits.oilTempMaxC).toBe(130);
+    } finally {
+      db.close();
+    }
+
+    // The same source again: nothing is reset and nothing is logged.
+    const again = await start({ ...env, VEHICLE_SOURCE: 'car' }, { clock: { now: () => later + SECOND }, logDestination });
+    await again.close();
+    expect(warnings()).toHaveLength(1);
+  });
+
+  test('a database from before the source record that holds demo alerts is reset on a first start with the car', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'copilot-backend-'));
+    const databasePath = join(dir, 'copilot.sqlite');
+    const old = new DatabaseSync(databasePath);
+    for (const sql of MIGRATIONS.slice(0, 3)) old.exec(sql);
+    old.exec('PRAGMA user_version = 3');
+    old.exec(`INSERT INTO alert_events VALUES ('cc:39:1', 'check-control', 'cc:39', 'bmw-check-control', 'critical',
+      'Температура двигуна. Обережно зупиніться', NULL, ${START}, 1, NULL)`);
+    old.close();
+
+    const handle = await start(
+      { DATABASE_PATH: databasePath, PORT: '0', LOG_LEVEL: 'silent', VEHICLE_SOURCE: 'car' }, { clock: { now: () => START + SECOND } },
+    );
+    await handle.close();
+    const db = openDatabase(databasePath);
+    try {
+      expect(new AlertStore(db).active()).toEqual([]);
+      expect(db.prepare('SELECT source FROM vehicle_source').all()).toEqual([{ source: 'car' }]);
+    } finally {
+      db.close();
+    }
   });
 
   test('a configuration error rejects start() before anything is opened', async () => {

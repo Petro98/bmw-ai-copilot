@@ -37,7 +37,9 @@ export const settingsSchema = z.object({
     tyrePressureDeviationBar: limit(0.05, 2),
   }),
   popupsEnabled: z.boolean(),
-  diagnosticsEnabled: z.boolean(),
+  // Diagnostic reads stay off until the owner approves the check in the car (Plan 1 Task 13; the panel's switch is
+  // disabled with «Вимкнено, доки ви не погодите перевірку в авто»): the API cannot turn them on either.
+  diagnosticsEnabled: z.literal(false),
 });
 
 const SCENARIO_IDS = SCENARIOS.map((s) => s.id);

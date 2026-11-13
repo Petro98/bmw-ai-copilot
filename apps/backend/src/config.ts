@@ -35,6 +35,13 @@ export interface Config {
 const EFFORTS: readonly Effort[] = ['low', 'medium', 'high'];
 const LOG_LEVELS: readonly LogLevel[] = ['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'];
 const MAX_VEHICLE_LABEL_CHARS = 80;
+/**
+ * A vehicle identification number: 17 letters and digits without I, O and Q (ISO 3779). VEHICLE_LABEL reaches every
+ * prompt sent to Claude, so a label holding one is refused.
+ */
+const VIN_SHAPE = /\b[A-HJ-NPR-Z0-9]{17}\b/i;
+/** Below this an answer (and adaptive thinking, which spends from the same limit) is cut off or comes back empty. */
+export const MIN_CLAUDE_MAX_TOKENS = 1024;
 const MIN_OWNER_TOKEN_CHARS = 24;
 const MIN_SESSION_SECRET_CHARS = 32;
 const MAX_SECRET_CHARS = 512;
@@ -131,6 +138,10 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
   if (vehicleLabel !== null && vehicleLabel.length > MAX_VEHICLE_LABEL_CHARS) {
     problems.push(`VEHICLE_LABEL: at most ${MAX_VEHICLE_LABEL_CHARS} characters`);
   }
+  // The message names the rule, never the value.
+  if (vehicleLabel !== null && VIN_SHAPE.test(vehicleLabel)) {
+    problems.push('VEHICLE_LABEL: must not contain a vehicle identification number');
+  }
 
   const corsOrigin = text('CORS_ORIGIN', 'http://localhost:4200');
   if (!isOrigin(corsOrigin)) problems.push('CORS_ORIGIN: must be one origin such as http://localhost:4200 (scheme, host and port, no path)');
@@ -145,7 +156,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     claudeModelVoice: text('CLAUDE_MODEL_VOICE', claudeModel),
     claudeEffort: oneOf('CLAUDE_EFFORT', 'medium', EFFORTS),
     claudeEffortVoice: oneOf('CLAUDE_EFFORT_VOICE', 'low', EFFORTS),
-    claudeMaxTokens: integer('CLAUDE_MAX_TOKENS', 16000, 1, 128_000),
+    claudeMaxTokens: integer('CLAUDE_MAX_TOKENS', 16000, MIN_CLAUDE_MAX_TOKENS, 128_000),
     claudeTimeoutMs: integer('CLAUDE_TIMEOUT_MS', 60_000, 1000, 600_000),
     budgetDailyUsd: amount('BUDGET_DAILY_USD', 1),
     budgetMonthlyUsd: amount('BUDGET_MONTHLY_USD', 20),

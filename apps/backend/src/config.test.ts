@@ -1,6 +1,6 @@
 import { Writable } from 'node:stream';
 import { describe, expect, test } from 'vitest';
-import { loadConfig } from './config';
+import { MIN_CLAUDE_MAX_TOKENS, loadConfig } from './config';
 import { createLogger } from './logger';
 
 // A made-up key shape: never a real credential.
@@ -73,6 +73,32 @@ describe('loadConfig', () => {
   test('the car source is accepted since the car link exists (Plan 2 Task 7); anything else is refused', () => {
     expect(loadConfig({ VEHICLE_SOURCE: 'car' }).vehicleSource).toBe('car');
     expect(() => loadConfig({ VEHICLE_SOURCE: 'bus' })).toThrow(/VEHICLE_SOURCE/);
+  });
+});
+
+describe('loadConfig: safety limits', () => {
+  test('a VEHICLE_LABEL holding a vehicle identification number is refused without echoing it', () => {
+    // A made-up value of the VIN shape (17 characters, no I, O or Q): never a real vehicle's.
+    const vinShaped = 'TESTX00000A000000';
+    for (const label of [vinShaped, `Мій X3 ${vinShaped}`, vinShaped.toLowerCase()]) {
+      let message = '';
+      try {
+        loadConfig({ VEHICLE_LABEL: label });
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message).toContain('VEHICLE_LABEL');
+      expect(message).not.toContain(vinShaped);
+      expect(message.toLowerCase()).not.toContain(vinShaped.toLowerCase());
+    }
+    expect(loadConfig({ VEHICLE_LABEL: 'BMW X3 G01, 2019' }).vehicleLabel).toBe('BMW X3 G01, 2019');
+    expect(loadConfig({ VEHICLE_LABEL: 'Мій сірий кросовер xDrive30d' }).vehicleLabel).toBe('Мій сірий кросовер xDrive30d');
+  });
+
+  test(`CLAUDE_MAX_TOKENS is at least ${MIN_CLAUDE_MAX_TOKENS}`, () => {
+    expect(() => loadConfig({ CLAUDE_MAX_TOKENS: '1' })).toThrow(/CLAUDE_MAX_TOKENS/);
+    expect(() => loadConfig({ CLAUDE_MAX_TOKENS: String(MIN_CLAUDE_MAX_TOKENS - 1) })).toThrow(/CLAUDE_MAX_TOKENS/);
+    expect(loadConfig({ CLAUDE_MAX_TOKENS: String(MIN_CLAUDE_MAX_TOKENS) }).claudeMaxTokens).toBe(MIN_CLAUDE_MAX_TOKENS);
   });
 });
 

@@ -4,10 +4,10 @@ import type { DatabaseSync } from 'node:sqlite';
 import { Writable } from 'node:stream';
 import type { FastifyInstance, InjectOptions, LightMyRequestResponse } from 'fastify';
 import { afterEach, describe, expect, test } from 'vitest';
-import { CostGuard, MockClaudeGateway, type ClaudeGateway } from '@copilot/ai-core';
+import { CostGuard, MockClaudeGateway, type BuiltPrompt, type ClaudeGateway } from '@copilot/ai-core';
 import type { AlertEvent } from '@copilot/event-engine';
 import type { CarConfigResponse, CarDialogResponse, DeviceDto, DialogTurn, LiveEvent, StatusDto } from '@copilot/shared';
-import { available, emptySnapshot, type VehicleSnapshot } from '@copilot/vehicle-core';
+import { MockVehicleDataProvider, available, emptySnapshot, type TimerApi, type VehicleSnapshot } from '@copilot/vehicle-core';
 import { AssistantService } from '../../assistant/assistant-service';
 import { assistantConfigFrom, loadConfig, type Config } from '../../config';
 import { openDatabase } from '../../db/database';
@@ -27,6 +27,8 @@ import { DialogFeed } from './routes';
 
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;
+const HOUR = 60 * MINUTE;
+const NO_TIMERS: TimerApi = { setInterval: () => null, clearInterval: () => undefined };
 const START = Date.UTC(2026, 10, 13, 10, 0, 0);   // 2026-11-13T10:00:00Z
 // Obviously fake values of the required lengths: never real credentials.
 const OWNER_TOKEN = 'test-owner-token-000000000000';
@@ -51,12 +53,16 @@ interface Rig {
   car(method: 'GET' | 'POST', path: string, payload?: InjectOptions['payload'], headers?: Record<string, string>): Promise<LightMyRequestResponse>;
 }
 
-interface RigOptions { env?: Record<string, string>; gateway?: ClaudeGateway; dialogWaitMs?: number; register?: boolean }
+interface RigOptions {
+  env?: Record<string, string>; gateway?: ClaudeGateway; dialogWaitMs?: number; register?: boolean;
+  /** VEHICLE_SOURCE=mock: the hub runs on the mock vehicle and the car link has no provider (main.ts wiring). */
+  mockSource?: boolean;
+}
 
 const rigs: Rig[] = [];
 
 async function rig(options: RigOptions = {}): Promise<Rig> {
-  const config: Config = loadConfig({ LOG_LEVEL: 'trace', VEHICLE_SOURCE: 'car', ...options.env });
+  const config: Config = loadConfig({ LOG_LEVEL: 'trace', VEHICLE_SOURCE: options.mockSource ? 'mock' : 'car', ...options.env });
   const logs: string[] = [];
   const sink = new Writable({ write(chunk, _encoding, done) { logs.push(String(chunk)); done(); } });
   const db = openDatabase(':memory:');
@@ -69,8 +75,9 @@ async function rig(options: RigOptions = {}): Promise<Rig> {
   const bus = new LiveBus();
   const events: LiveEvent[] = [];
   bus.subscribe((event) => { events.push(event); });
+  const mock = options.mockSource ? new MockVehicleDataProvider({ clock, timers: NO_TIMERS, scenario: 'steady-cruise' }) : null;
   const hub = new VehicleHub({
-    provider, engine: null, alerts, telemetry, settings, bus, clock, sampleIntervalMs: MINUTE, retentionDays: 90,
+    provider: mock ?? provider, engine: null, alerts, telemetry, settings, bus, clock, sampleIntervalMs: MINUTE, retentionDays: 90,
   });
   const guard = new CostGuard({
     dailyUsdLimit: config.budgetDailyUsd, monthlyUsdLimit: config.budgetMonthlyUsd,
@@ -84,8 +91,8 @@ async function rig(options: RigOptions = {}): Promise<Rig> {
     config: assistantConfigFrom(config), newId: () => `turn-${++n}`,
   });
   const app = buildApp({
-    config, logger: createLogger(config, sink), hub, bus, assistant, dialog, alerts, settings, guard, mock: null, clock,
-    carLink: { devices, provider, feed, dialogWaitMs: options.dialogWaitMs },
+    config, logger: createLogger(config, sink), hub, bus, assistant, dialog, alerts, settings, guard, mock, clock,
+    carLink: { devices, provider: mock ? null : provider, feed, dialogWaitMs: options.dialogWaitMs },
   });
   await hub.start();
   await app.ready();
@@ -129,6 +136,10 @@ function raise(overrides: Partial<AlertEvent> = {}): AlertEvent {
 }
 
 const alertEvents = (r: Rig): AlertEvent[] => r.events.flatMap((e) => (e.type === 'alert' ? [e.alert] : []));
+
+/** Parsed log lines at warn level (40) and above. */
+const warnings = (r: Rig): Array<{ msg: string }> =>
+  r.logs.map((line) => JSON.parse(line) as { level: number; msg: string }).filter((line) => line.level >= 40);
 
 function turn(id: string, at: number): DialogTurn {
   return { id, at, question: `Питання ${id}`, answer: `Відповідь ${id}`, style: 'full', source: 'panel', model: 'mock', snapshotAt: null };
@@ -506,5 +517,167 @@ describe('secrets', () => {
     expect(r.logs.length).toBeGreaterThan(5);
     const everything = [...bodies, ...r.logs].join('\n');
     for (const secret of [DEVICE_SECRET, OWNER_TOKEN, SESSION_SECRET, cookieValue]) expect(everything).not.toContain(secret);
+  });
+});
+
+describe('a car calling a backend that runs with the mock vehicle', () => {
+  test('snapshots, alerts, questions and the dialog are a 404 naming VEHICLE_SOURCE=car, with one warning', async () => {
+    const r = await rig({ mockSource: true });
+    const requests: Array<['GET' | 'POST', string, object | undefined]> = [
+      ['POST', 'snapshots', { snapshots: [carSnapshot(START, 50)] }],
+      ['POST', 'alerts', { alerts: [raise()] }],
+      ['POST', 'ask', { text: 'Як авто?', style: 'spoken' }],
+      ['GET', 'dialog', undefined],
+      ['POST', 'snapshots', { snapshots: [carSnapshot(START, 50)] }],
+    ];
+    for (const [method, path, payload] of requests) {
+      const response = await r.car(method, path, payload);
+      expect(response.statusCode).toBe(404);
+      expect(response.json()).toEqual({ error: { code: 'not-found', message: expect.stringContaining('VEHICLE_SOURCE=car') } });
+    }
+    // Nothing of the car's reached the stores or the vehicle state, and nobody was answered from the mock vehicle.
+    expect(r.alerts.recent(10)).toEqual([]);
+    expect(r.dialog.recent(10)).toEqual([]);
+    const oil = r.hub.snapshot().oilTemp;
+    expect(oil.available && oil.source).toBe('mock');
+    expect(warnings(r).filter((line) => /VEHICLE_SOURCE/.test(line.msg))).toHaveLength(1);
+
+    // The device check still comes first, and the configuration stays readable.
+    const stranger = await r.app.inject({ method: 'POST', url: '/car/v1/snapshots', payload: { snapshots: [] } });
+    expect(stranger.statusCode).toBe(401);
+    expect((await r.car('GET', 'config')).statusCode).toBe(200);
+  });
+});
+
+describe('a head-unit clock that is wrong but inside the certificate validity', () => {
+  test.each([['two hours behind', -2 * HOUR], ['two hours ahead', 2 * HOUR]])(
+    '%s: with sentAt every time is moved onto the server clock',
+    async (_name, skew) => {
+      const r = await rig();
+      const carNow = START + skew;
+      const sent = carSnapshot(carNow - 2 * SECOND);
+      expect((await r.car('POST', 'snapshots', { snapshots: [sent], sentAt: carNow })).statusCode).toBe(204);
+      const served = r.hub.snapshot();
+      const at = START - 2 * SECOND;
+      expect(served.takenAt).toBe(at);
+      expect(served.oilTemp).toEqual(available(92, '°C', 'passive-signal', at));
+      expect(served.checkControl).toEqual(
+        available([{ id: 39, text: 'Температура двигуна', severity: 'critical', since: at }], null, 'passive-signal', at),
+      );
+      expect(r.db.prepare('SELECT at FROM telemetry_samples').all()).toEqual([{ at }]);
+
+      const raised = raise({ at: carNow - MINUTE });
+      expect((await r.car('POST', 'alerts', { alerts: [raised], sentAt: carNow })).statusCode).toBe(204);
+      expect(r.alerts.get(raised.id)).toEqual({ ...raised, at: START - MINUTE });
+      const clearing = raise({ severity: 'info', title: '', active: false, clearedAt: carNow - SECOND });
+      expect((await r.car('POST', 'alerts', { alerts: [clearing], sentAt: carNow })).statusCode).toBe(204);
+      expect(r.alerts.get(raised.id)).toEqual({ ...raised, at: START - MINUTE, active: false, clearedAt: START - SECOND });
+    },
+  );
+
+  test('without sentAt, or with an offset inside two minutes, the times are kept as sent', async () => {
+    const r = await rig();
+    const behind = START - 2 * HOUR;
+    await r.car('POST', 'snapshots', { snapshots: [carSnapshot(behind)] });
+    expect(r.hub.snapshot().takenAt).toBe(behind);
+    await r.car('POST', 'alerts', { alerts: [raise({ at: behind })] });
+    expect(r.alerts.get(raise().id)?.at).toBe(behind);
+
+    const near = START - 90 * SECOND;
+    await r.car('POST', 'snapshots', { snapshots: [carSnapshot(near - SECOND)], sentAt: near });
+    expect(r.hub.snapshot().takenAt).toBe(near - SECOND);
+  });
+
+  test('a sentAt that is not a number is a 400', async () => {
+    const r = await rig();
+    expect((await r.car('POST', 'snapshots', { snapshots: [carSnapshot(START)], sentAt: 'now' })).statusCode).toBe(400);
+    expect((await r.car('POST', 'alerts', { alerts: [raise()], sentAt: null })).statusCode).toBe(400);
+    expect(r.provider.connected()).toBe(false);
+    expect(r.alerts.recent(10)).toEqual([]);
+  });
+});
+
+describe('removing a device', () => {
+  test('in car mode it clears the alerts the car reported and publishes each clearing', async () => {
+    const r = await rig();
+    const second = raise({ id: 'check-control:cc:40:2000', dedupKey: 'cc:40', at: START + SECOND });
+    await r.car('POST', 'alerts', { alerts: [raise(), second] });
+    r.clock.t += MINUTE;
+    expect((await r.app.inject({ method: 'DELETE', url: `/api/devices/${DEVICE_ID}` })).statusCode).toBe(204);
+    expect(r.alerts.active()).toEqual([]);
+    const cleared = alertEvents(r).filter((alert) => !alert.active);
+    expect(cleared).toEqual(expect.arrayContaining([
+      { ...raise(), active: false, clearedAt: START + MINUTE },
+      { ...second, active: false, clearedAt: START + MINUTE },
+    ]));
+    expect(cleared).toHaveLength(2);
+  });
+
+  test('registering the same device again clears nothing', async () => {
+    const r = await rig();
+    await r.car('POST', 'alerts', { alerts: [raise()] });
+    const again = await r.app.inject({
+      method: 'POST', url: '/api/devices', payload: { deviceId: DEVICE_ID, secret: DEVICE_SECRET, label: 'Головний блок' },
+    });
+    expect(again.statusCode).toBe(201);
+    expect(r.alerts.active()).toEqual([raise()]);
+  });
+
+  test('with the mock vehicle it leaves the alerts alone', async () => {
+    const r = await rig({ mockSource: true });
+    r.alerts.upsert(raise());
+    expect((await r.app.inject({ method: 'DELETE', url: `/api/devices/${DEVICE_ID}` })).statusCode).toBe(204);
+    expect(r.alerts.active()).toEqual([raise()]);
+  });
+});
+
+describe('prompt history after a change of vehicle source', () => {
+  test('turns from before the source began are not given to Claude, but stay in the dialog', async () => {
+    const prompts: BuiltPrompt[] = [];
+    const inner = new MockClaudeGateway();
+    const gateway: ClaudeGateway = { ask: (prompt, options) => { prompts.push(prompt); return inner.ask(prompt, options); } };
+    const db = openDatabase(':memory:');
+    try {
+      const dialog = new DialogStore(db);
+      dialog.add(turn('demo', START - HOUR));
+      dialog.add(turn('real', START + SECOND));
+      const feed = new DialogFeed(dialog, START);
+      expect(feed.lastTurns(4).map((t) => t.id)).toEqual(['real']);
+      expect(feed.lastTurns(4, START + 2 * SECOND)).toEqual([]);
+
+      const clock = { now: () => START + MINUTE };
+      const config = loadConfig({ LOG_LEVEL: 'silent' });
+      const settings = new SettingsStore(db);
+      const telemetry = new TelemetryStore(db);
+      const alerts = new AlertStore(db);
+      const hub = new VehicleHub({
+        provider: new CarLinkVehicleDataProvider({ clock }), engine: null, alerts, telemetry, settings, bus: new LiveBus(),
+        clock, sampleIntervalMs: MINUTE, retentionDays: 90,
+      });
+      const guard = new CostGuard({ dailyUsdLimit: 1, monthlyUsdLimit: 20, requestsPerMinute: 10, clock, store: new SqliteUsageStore(db) });
+      const assistant = new AssistantService({
+        hub, dialog: feed, alerts, settings, telemetry, gateway, guard, clock, config: assistantConfigFrom(config), newId: () => 'new',
+      });
+      await assistant.ask({ text: 'Як авто?' });
+      const history = prompts[0].messages.map((m) => m.content).join('\n');
+      expect(history).toContain('Питання real');
+      expect(history).not.toContain('Питання demo');
+      expect(dialog.recent(5).map((t) => t.id)).toEqual(['new', 'real', 'demo']);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe('error bodies', () => {
+  test('a malformed or over-long path parameter is a 400 ApiError that does not echo the URL', async () => {
+    const r = await rig();
+    for (const url of ['/api/devices/%zz', `/api/devices/${'x'.repeat(5000)}`]) {
+      const response = await r.app.inject({ method: 'DELETE', url });
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toEqual({ error: { code: 'validation', message: expect.any(String) } });
+      expect(response.body).not.toContain('%zz');
+      expect(response.body).not.toContain('xxxxxxxxxx');
+    }
   });
 });

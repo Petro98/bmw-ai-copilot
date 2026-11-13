@@ -181,6 +181,26 @@ describe('owner access', () => {
     expect(response.headers['set-cookie']).toBeUndefined();
   });
 
+  test('with no OWNER_TOKEN a request whose Host is not a loopback name is refused (DNS rebinding)', async () => {
+    const { app } = await rig();
+    for (const host of ['evil.example', 'evil.example:3000', '192.0.2.5:3000', '127.0.0.1.evil.example', 'localhost.evil.example']) {
+      const response = await app.inject({ method: 'GET', url: '/api/dialog', headers: { host } });
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toEqual({ error: { code: 'validation', message: expect.any(String) } });
+      expect(response.body).not.toContain('evil');
+    }
+    const asked = await app.inject({ method: 'POST', url: '/api/ask', payload: { text: 'Як авто?' }, headers: { host: 'evil.example:3000' } });
+    expect(asked.statusCode).toBe(400);
+    for (const host of ['localhost', 'localhost:3000', '127.0.0.1:3000', '127.0.0.2', '[::1]:3000', 'LOCALHOST:4200']) {
+      expect((await app.inject({ method: 'GET', url: '/api/status', headers: { host } })).statusCode).toBe(200);
+    }
+  });
+
+  test('with OWNER_TOKEN set the Host header is not checked (the session cookie is bound to the real host)', async () => {
+    const { app } = await rig(PROTECTED);
+    expect((await app.inject({ method: 'GET', url: '/api/health', headers: { host: 'copilot.example' } })).statusCode).toBe(200);
+  });
+
   test('device registration needs the owner session', async () => {
     const { app } = await rig(PROTECTED);
     const device = { deviceId: 'test-device-000000000001', secret: 'f'.repeat(64), label: 'Головний блок' };

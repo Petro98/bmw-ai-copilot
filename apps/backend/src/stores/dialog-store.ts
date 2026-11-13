@@ -21,10 +21,17 @@ function toTurn(row: Row): DialogTurn {
   };
 }
 
+/** Turns kept; the oldest beyond this are deleted as new ones arrive (the panel lists 50, the prompt takes a few). */
+export const MAX_DIALOG_TURNS = 1000;
+/** Before every stored turn: the default start of `lastTurns`. */
+const ALL_TIME = Number.MIN_SAFE_INTEGER;
+
 /** Stored question/answer turns. Only successful turns are ever added (Task 12). */
 export class DialogStore {
   private readonly insert: StatementSync;
   private readonly newest: StatementSync;
+  private readonly newestSince: StatementSync;
+  private readonly prune: StatementSync;
 
   constructor(db: DatabaseSync) {
     this.insert = db.prepare(
@@ -32,10 +39,17 @@ export class DialogStore {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     this.newest = db.prepare('SELECT * FROM dialog_turns ORDER BY at DESC, rowid DESC LIMIT ?');
+    this.newestSince = db.prepare('SELECT * FROM dialog_turns WHERE at >= ? ORDER BY at DESC, rowid DESC LIMIT ?');
+    this.prune = db.prepare(
+      `DELETE FROM dialog_turns WHERE rowid IN
+         (SELECT rowid FROM dialog_turns ORDER BY at DESC, rowid DESC LIMIT -1 OFFSET ${MAX_DIALOG_TURNS})`,
+    );
   }
 
+  /** Stores a turn, then deletes the oldest beyond MAX_DIALOG_TURNS. */
   add(turn: DialogTurn): void {
     this.insert.run(turn.id, turn.at, turn.question, turn.answer, turn.style, turn.source, turn.model, turn.snapshotAt);
+    this.prune.run();
   }
 
   /** Newest first. */
@@ -44,8 +58,14 @@ export class DialogStore {
     return n === 0 ? [] : this.newest.all(n).map(toTurn);
   }
 
-  /** The last `n` turns, oldest first (conversation order for the prompt). */
-  lastTurns(n: number): DialogTurn[] {
-    return this.recent(n).reverse();
+  /**
+   * The last `n` turns, oldest first (conversation order for the prompt). With `since`, only turns at or after it:
+   * turns from before a change of vehicle source never reach the prompt (db/vehicle-source.ts).
+   */
+  lastTurns(n: number, since: number = ALL_TIME): DialogTurn[] {
+    const limit = rowLimit(n);
+    if (limit === 0) return [];
+    const from = Number.isFinite(since) ? since : ALL_TIME;
+    return this.newestSince.all(from, limit).map(toTurn).reverse();
   }
 }
