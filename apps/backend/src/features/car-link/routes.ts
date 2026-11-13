@@ -179,7 +179,7 @@ const REASONS = ['not-reported', 'invalid-value', 'not-on-this-vehicle', 'diagno
 const CONDITIONS = ['parked', 'standby', 'living', 'ignition-on', 'starting', 'driving', 'stopping'] as const satisfies readonly VehicleCondition[];
 const GEAR_STAGES = ['P', 'R', 'N', 'D'] as const satisfies readonly GearStage[];
 const SEVERITIES = ['info', 'warning', 'critical'] as const satisfies readonly Severity[];
-const SERVICE_STATUSES = ['ok', 'due-soon', 'overdue', 'unknown'] as const satisfies readonly ServiceStatus[];
+const SERVICE_STATUSES = ['ok', 'due-soon', 'due-now', 'overdue', 'unknown'] as const satisfies readonly ServiceStatus[];
 const PROVENANCES = ['bmw-check-control', 'bmw-fault-status', 'bmw-service', 'owner-configured'] as const satisfies readonly Provenance[];
 
 /** `true` only when a list names every member of its type: a type gaining a member fails to compile here. */

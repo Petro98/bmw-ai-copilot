@@ -139,6 +139,17 @@ describe('buildPrompt', () => {
     expect(buildPrompt(input({ snapshot: standing })).system[1].text).toContain('РУХ: авто стоїть');
   });
 
+  test('a service item the car marks due now is rendered as due now, never as overdue', () => {
+    const dueNow: VehicleSnapshot = {
+      ...steadyCruise,
+      serviceItems: available([{ id: 3, name: 'Гальмівна рідина', status: 'due-now' as const, dueText: '01/2027' }], null, 'mock', NOW),
+    };
+    const text = renderSnapshot(dueNow, NOW);
+    expect(text).toContain('Сервіс: «Гальмівна рідина», потрібен зараз, «01/2027»');
+    expect(text).not.toContain('прострочено');
+    expect(renderSnapshot(steadyCruise, NOW)).toContain('Сервіс: «Гальмівна рідина», скоро, «через 3 місяці»');
+  });
+
   test('an id-only Check Control message is described as text unavailable', () => {
     expect(renderSnapshot(lowTyreIdOnly, now)).toContain('повідомлення 63, текст недоступний');
   });

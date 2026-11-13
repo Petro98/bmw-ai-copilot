@@ -221,7 +221,7 @@ describe('applyRaw', () => {
     expect((valueOf(s.serviceItems) as unknown[]).length).toBeLessThanOrEqual(32);
   });
 
-  test('service colours: red overdue, yellow or orange due soon, green ok, else unknown; BMW typo member first', () => {
+  test('service colours: red due now (never overdue), yellow or orange due soon, green ok, else unknown; BMW typo member first', () => {
     const s = emptySnapshot(0);
     applyRaw(s, KOMBI2, 'cbsDataServiceList', { cbsDataServiceList: [
       { cBSIdentifier: 1, cBSColor: 'RED', cBSServcieName: 'Typo name', cBSServiceName: 'Other name' },
@@ -229,14 +229,20 @@ describe('applyRaw', () => {
       { cBSIdentifier: 3, cBSColor: 4 },
       { cBSIdentifier: 4, cBSColor: 3 },
       { cBSIdentifier: 5, cBSColor: 'DEFAULT' },
+      { cBSIdentifier: 6, cBSColor: 1 },
+      { cBSIdentifier: 7, cBSColor: 'PURPLE' },
+      { cBSIdentifier: 8, cBSColor: 9 },
       { cBSColor: 'RED' },
     ] }, 1);
     expect(valueOf(s.serviceItems)).toEqual([
-      { id: 1, name: 'Typo name', status: 'overdue', dueText: null },
+      { id: 1, name: 'Typo name', status: 'due-now', dueText: null },
       { id: 2, name: null, status: 'due-soon', dueText: null },
       { id: 3, name: null, status: 'due-soon', dueText: null },
       { id: 4, name: null, status: 'ok', dueText: null },
       { id: 5, name: null, status: 'unknown', dueText: null },
+      { id: 6, name: null, status: 'due-now', dueText: null },
+      { id: 7, name: null, status: 'unknown', dueText: null },
+      { id: 8, name: null, status: 'unknown', dueText: null },
     ]);
     applyRaw(s, KOMBI2, 'cbsDataServiceList', 42, 2);
     expect(s.serviceItems).toEqual({ available: false, reason: 'invalid-value' });

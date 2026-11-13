@@ -443,13 +443,13 @@ function applyCheckControlTexts(s: VehicleSnapshot, v: unknown, now: number, sta
 /**
  * cBSColor, the CBS colour enum `{ DEFAULT: 0, RED: 1, YELLOW: 2, GREEN: 3, ORANGE: 4 }` (A:apps/service/main.js:81,
  * telemetry.md F6), read as the reference labels it (A:apps/service/main.js:51 `STATUS = ['', 'Due now',
- * 'Due soon', 'OK', 'Due soon']`, :565): YELLOW 2 / ORANGE 4 → due soon, GREEN 3 → ok. RED 1 is "Due now" there,
- * not "overdue" (the reference computes overdue separately, from the due date, :73); ServiceStatus
- * (packages/vehicle-core) has no "due now", so RED maps to its most urgent value, 'overdue', the safest of the
- * statuses it has. DEFAULT 0 and anything else → unknown.
+ * 'Due soon', 'OK', 'Due soon']`, and :565 `LBL = ['', 'DUE NOW', 'DUE SOON', 'OK', 'DUE SOON']`): RED 1 → due now,
+ * YELLOW 2 / ORANGE 4 → due soon, GREEN 3 → ok. The enum has no overdue colour: the reference words "overdue" only
+ * from the due date it parses (:73), never from cBSColor, so nothing here maps to 'overdue' (telemetry.md F6's
+ * "RED = overdue" is not what the source says). DEFAULT 0 and anything else → unknown.
  */
 function serviceStatusOf(colour: unknown): ServiceStatus {
-  if (colour === 'RED' || colour === 1) return 'overdue';
+  if (colour === 'RED' || colour === 1) return 'due-now';
   if (colour === 'YELLOW' || colour === 'ORANGE' || colour === 2 || colour === 4) return 'due-soon';
   if (colour === 'GREEN' || colour === 3) return 'ok';
   return 'unknown';

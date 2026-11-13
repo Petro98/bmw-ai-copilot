@@ -28,7 +28,7 @@ const CONDITION_UK: Record<VehicleCondition, string> = {
 const SEVERITY_UK: Record<Severity, string> = { critical: 'критичне', warning: 'попередження', info: 'інформаційне' };
 
 const SERVICE_STATUS_UK: Record<ServiceStatus, string> = {
-  ok: 'в нормі', 'due-soon': 'скоро', overdue: 'прострочено', unknown: 'стан невідомий',
+  ok: 'в нормі', 'due-soon': 'скоро', 'due-now': 'потрібен зараз', overdue: 'прострочено', unknown: 'стан невідомий',
 };
 
 const WHEELS: ReadonlyArray<[keyof TyreSet<unknown>, string]> = [

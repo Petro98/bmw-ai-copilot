@@ -5,7 +5,11 @@ export type VehicleCondition =
 export type GearStage = 'P' | 'R' | 'N' | 'D';
 export type Severity = 'info' | 'warning' | 'critical';
 export interface CheckControlMessage { id: number; text: string | null; severity: Severity; since: number }
-export type ServiceStatus = 'ok' | 'due-soon' | 'overdue' | 'unknown';
+/**
+ * A BMW service (CBS) item's state. 'due-now' is what the car reports for its most urgent colour (car/src/provider/
+ * raw-decoders.ts); the car has no distinct overdue state, so 'overdue' never comes from the car (mock and future use).
+ */
+export type ServiceStatus = 'ok' | 'due-soon' | 'due-now' | 'overdue' | 'unknown';
 export interface ServiceItem { id: number; name: string | null; status: ServiceStatus; dueText: string | null }
 export interface FaultCode { ecu: string; code: string; text: string | null; activeNow: boolean; warningLamp: boolean }
 export interface TyreSet<T> { frontLeft: T; frontRight: T; rearLeft: T; rearRight: T }

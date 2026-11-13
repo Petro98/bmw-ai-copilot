@@ -713,6 +713,7 @@ function ownerLimitsRule() {
 
 // ../packages/event-engine/src/rules/service.ts
 var THIRTY_DAYS_MS = 2592e6;
+var SERVICE_DUE_NOW_DETAIL = "Сервіс потрібен зараз";
 function serviceRule() {
   return {
     id: "service",
@@ -724,14 +725,14 @@ function serviceRule() {
       if (!reading.available || !Array.isArray(reading.value)) return null;
       const out = [];
       for (const item of reading.value) {
-        if (!item || item.status !== "due-soon" && item.status !== "overdue") continue;
+        if (!item || item.status !== "due-soon" && item.status !== "due-now" && item.status !== "overdue") continue;
         const name = typeof item.name === "string" && item.name.trim() !== "" ? item.name : `Сервіс ${item.id}`;
         const due = typeof item.dueText === "string" && item.dueText.trim() !== "" ? item.dueText : null;
         out.push({
           dedupKey: `service:${item.id}:${item.status}`,
-          severity: item.status === "overdue" ? "warning" : "info",
+          severity: item.status === "due-soon" ? "info" : "warning",
           title: due === null ? name : `${name}: ${due}`,
-          detail: null
+          detail: item.status === "due-now" ? SERVICE_DUE_NOW_DETAIL : null
         });
       }
       return out;
@@ -1740,7 +1741,7 @@ function applyCheckControlTexts(s, v, now, state) {
   if (state.checkControlKnown) rebuildCheckControl(s, state, now);
 }
 function serviceStatusOf(colour) {
-  if (colour === "RED" || colour === 1) return "overdue";
+  if (colour === "RED" || colour === 1) return "due-now";
   if (colour === "YELLOW" || colour === "ORANGE" || colour === 2 || colour === 4) return "due-soon";
   if (colour === "GREEN" || colour === 3) return "ok";
   return "unknown";

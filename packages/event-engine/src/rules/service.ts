@@ -3,7 +3,10 @@ import { Candidate, Rule, RuleContext } from '../types';
 /** Cooldown of the service rule: a CBS item is announced at most once per state change (spec §7). */
 export const THIRTY_DAYS_MS = 2_592_000_000;
 
-/** One candidate per BMW service (CBS) item that is due soon or overdue; the state is part of the key. */
+/** What a due-now alert adds to the car's own name and due text: the state the car reported, in words. */
+const SERVICE_DUE_NOW_DETAIL = 'Сервіс потрібен зараз';
+
+/** One candidate per BMW service (CBS) item that is due soon, due now or overdue; the state is part of the key. */
 export function serviceRule(): Rule {
   return {
     id: 'service',
@@ -16,14 +19,14 @@ export function serviceRule(): Rule {
       if (!reading.available || !Array.isArray(reading.value)) return null;
       const out: Candidate[] = [];
       for (const item of reading.value) {
-        if (!item || (item.status !== 'due-soon' && item.status !== 'overdue')) continue;
+        if (!item || (item.status !== 'due-soon' && item.status !== 'due-now' && item.status !== 'overdue')) continue;
         const name = typeof item.name === 'string' && item.name.trim() !== '' ? item.name : `Сервіс ${item.id}`;
         const due = typeof item.dueText === 'string' && item.dueText.trim() !== '' ? item.dueText : null;
         out.push({
           dedupKey: `service:${item.id}:${item.status}`,
-          severity: item.status === 'overdue' ? 'warning' : 'info',
+          severity: item.status === 'due-soon' ? 'info' : 'warning',
           title: due === null ? name : `${name}: ${due}`,
-          detail: null,
+          detail: item.status === 'due-now' ? SERVICE_DUE_NOW_DETAIL : null,
         });
       }
       return out;

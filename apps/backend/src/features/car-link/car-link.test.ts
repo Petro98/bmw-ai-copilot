@@ -251,6 +251,20 @@ describe('device access', () => {
     expect(cc.available && cc.value.length).toBe(64);
   });
 
+  test('a snapshot with every service status the car decoder produces is accepted, due now included', async () => {
+    const r = await rig();
+    const at = START - SECOND;
+    const statuses = ['ok', 'due-soon', 'due-now', 'unknown'] as const;
+    const snapshot: VehicleSnapshot = {
+      ...carSnapshot(at),
+      serviceItems: available(statuses.map((status, id) => ({ id, name: 'x', status, dueText: null })), null, 'passive-signal', at),
+    };
+    const response = await r.car('POST', 'snapshots', { snapshots: [snapshot] });
+    expect(response.statusCode).toBe(204);
+    const items = r.hub.snapshot().serviceItems;
+    expect(items.available && items.value.map((i) => i.status)).toEqual(['ok', 'due-soon', 'due-now', 'unknown']);
+  });
+
   test('GET /car/v1/config carries the owner limits and the pop-up switch', async () => {
     const r = await rig();
     const response = await r.car('GET', 'config');

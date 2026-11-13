@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest';
 import { available } from './reading';
-import { emptySnapshot, isMoving, isMovingNow, isReversing, MOTION_FRESH_MS } from './snapshot';
+import { emptySnapshot, isMoving, isMovingNow, isReversing, MOTION_FRESH_MS, type ServiceItem, type ServiceStatus } from './snapshot';
 
 test('emptySnapshot reports every reading as not-reported', () => {
   const s = emptySnapshot(7);
@@ -30,4 +30,11 @@ test('isMovingNow needs a fresh speed reading', () => {
   expect(isMovingNow(driving, at + MOTION_FRESH_MS + 1)).toBeNull();        // the car stopped reporting
   expect(isMovingNow(driving, at - 5000)).toBe(true);                       // clock went backwards
   expect(isMovingNow({ ...driving, speed: available(0, 'km/h', 'mock', at) }, at)).toBe(false);
+});
+
+test('a service item can be due now, the state the car reports, distinct from overdue', () => {
+  const statuses: ServiceStatus[] = ['ok', 'due-soon', 'due-now', 'overdue', 'unknown'];
+  const item: ServiceItem = { id: 3, name: null, status: 'due-now', dueText: null };
+  expect(statuses).toContain(item.status);
+  expect(item.status).not.toBe('overdue');
 });

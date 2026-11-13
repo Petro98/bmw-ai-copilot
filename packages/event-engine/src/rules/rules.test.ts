@@ -234,6 +234,31 @@ test('service item raises once per state and not again within 30 days', () => {
   expect(raised(step(engine, build(later), later))).toHaveLength(1);
 });
 
+test('a service item the car marks due now raises once as a warning, worded as due now, with only the due text the car sent', () => {
+  const engine = newEngine();
+  const build = scenario('steady-cruise');
+  const dueNow = (t: number, dueText: string | null) => {
+    const s = build(t);
+    s.serviceItems = available([{ id: 3, name: 'Гальмівна рідина', status: 'due-now', dueText }], null, 'mock', START + t);
+    return s;
+  };
+  const first = raised(step(engine, dueNow(0, '01/2027'), 0));
+  expect(first).toHaveLength(1);
+  expect(first[0]).toMatchObject({
+    ruleId: 'service', dedupKey: 'service:3:due-now', provenance: 'bmw-service', severity: 'warning',
+    title: 'Гальмівна рідина: 01/2027', detail: 'Сервіс потрібен зараз',
+  });
+  expect(step(engine, dueNow(SECOND, '01/2027'), SECOND)).toEqual([]);
+  expect(step(engine, dueNow(10 * MINUTE, '01/2027'), 10 * MINUTE)).toEqual([]);
+  expect(engine.history()).toHaveLength(1);
+
+  // Without a due text from the car the title is the name alone: nothing is made up.
+  const other = newEngine();
+  const bare = raised(step(other, dueNow(0, null), 0));
+  expect(bare).toHaveLength(1);
+  expect(bare[0]).toMatchObject({ title: 'Гальмівна рідина', detail: 'Сервіс потрібен зараз', severity: 'warning' });
+});
+
 test('only faults that are active with the warning lamp are raised', () => {
   const engine = newEngine();
   runScenario(engine, 'stored-faults', 0, 2 * MINUTE);
