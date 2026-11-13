@@ -26,7 +26,8 @@
   ],
   "settings": [
     { "key": "popups", "type": "bool", "label": "Спливаючі сповіщення", "default": true },
-    { "key": "latinPopups", "type": "bool", "label": "Сповіщення латиницею", "default": false }
+    { "key": "latinPopups", "type": "bool", "label": "Сповіщення латиницею", "default": false },
+    { "key": "testPopup", "type": "bool", "label": "Тестове сповіщення", "default": false }
   ],
   "popups": [
     { "name": "ALERT_POP", "type": "popUp", "widget": "LT_State_PopupSmall", "label": "text3", "button": "OK" }

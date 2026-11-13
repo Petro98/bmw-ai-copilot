@@ -19,6 +19,18 @@
  * that fact is kept in the state file (`paired`), and a 401/403 later clears it. Before any request has been
  * answered in this waking period the network marks never read as working.
  *
+ * Alerts to the phone: a raised `critical` or `warning` alert is sent at once; its clearing and a re-opening (both
+ * under the id of the raise) are queued and go with the next raise or the next minute's batch (UplinkClient
+ * queueAlerts), so the car link stays within its once-a-minute budget. The backend has no rules of its own when
+ * the car is the vehicle source: without these, an alert the car raised would never clear on the phone. `info`
+ * alerts stay on the car, and so do their clearings, except a clearing rebuilt after a restart (severity 'info',
+ * empty title), whose original severity is unknown.
+ *
+ * The owner's test switch «Тестове сповіщення» (settings key `testPopup`): turning it on (off to on) shows one
+ * pop-up «Тестове сповіщення Copilot» through the presenter, with the same gates as an alert, and nothing is
+ * listed, kept or sent. The app cannot turn the switch back off (our code has no settings writer: kit.d.ts), so
+ * it fires once per off-to-on change. While asleep it does nothing.
+ *
  * Writes (spec §9): the state file is written when the car falls asleep (once per drive), when the device is
  * created, when pairing changes, and when the owner's settings or the fetched config change. persist() writes it
  * only if something changed since the last write; main.ts calls it when the process exits, so a restart in the
@@ -39,6 +51,7 @@ import { measure, type Sample } from './selfmeasure';
 import { StateFile, type PersistedState } from './state/state-file';
 import type { FrameFn } from './ui/draw-header';
 import { SCREEN, startScreen, type Screen, type ScreenInput } from './ui/screen';
+import { TEXT_TEST_POPUP } from './ui/strings.uk';
 import { pairingUrl } from './ui/view-model';
 import { HttpsClient, UplinkError, type RequestOptions } from './uplink/https-client';
 import { readLease } from './uplink/lease';
@@ -89,6 +102,10 @@ export const LISTED_MAX = 20;
 const DEVICE_ID_BYTES = 12;
 /** Device secret: 32 random bytes, 64 hex characters (the backend asks for at least 32). */
 const DEVICE_SECRET_BYTES = 32;
+/** The car's settings switch that shows the test pop-up (app.json "settings"). */
+export const TEST_POPUP_SETTING = 'testPopup';
+/** The presenter's de-duplication id of the test pop-up. */
+const TEST_POPUP_ID = 'copilot-test-popup';
 
 /** The Ukrainian error lines on the assistant tab (plan 2 Task 9). */
 export const TEXT_NO_SERVER = 'Немає зв\'язку з сервером';
@@ -125,6 +142,15 @@ const NO_DISK: FsApi = {
 
 function isTurn(v: unknown): v is DialogTurn {
   return typeof v === 'object' && v !== null && typeof (v as { id?: unknown }).id === 'string';
+}
+
+/** Whether an event goes to the phone: raised alerts the car pops up, and every later state of those. */
+function uploads(event: AlertEvent): boolean {
+  if (event.severity === 'critical' || event.severity === 'warning') return true;
+  // a clearing rebuilt after a restart carries severity 'info' and an empty title (rule-runner.ts restoredClearing).
+  // Its original severity is not kept anywhere, so it is sent even when the raise was an info alert the phone never
+  // got: the backend then holds a cleared alert with an empty title under an id it did not know (open question).
+  return event.active === false && event.title === '';
 }
 
 function sameJson(a: unknown, b: unknown): boolean {
@@ -295,14 +321,20 @@ export function startApp(deps: AppDeps): AppHandle {
     limits: () => state.limits,
     clock,
     onEvents: (events) => {
-      const send: AlertEvent[] = [];
+      const upload: AlertEvent[] = [];
+      let raised = false;
       for (const event of events) {
         list(event);
         // the identical object the runner handed over: its re-opened mark is keyed on object identity
         presenter.present(event);
-        if (event.active && !isReopened(event) && (event.severity === 'critical' || event.severity === 'warning')) send.push(event);
+        if (!uploads(event)) continue;
+        upload.push(event);
+        if (event.active && !isReopened(event)) raised = true;
       }
-      if (uplink && send.length > 0) uplink.sendAlerts(send);
+      if (!uplink || upload.length === 0) return;
+      // a raise goes at once (with what waits before it); clearings and re-openings ride with the next send
+      if (raised) uplink.sendAlerts(upload);
+      else uplink.queueAlerts(upload);
     },
   });
 
@@ -372,6 +404,8 @@ export function startApp(deps: AppDeps): AppHandle {
   let polling = false;
   let pollGen = 0;
   let pollWait: unknown = null;
+  /** Ends the poll that is open now, alone (UplinkClient.pollDialog's cancel handle); null when none is. */
+  let pollCancel: (() => void) | null = null;
 
   const pollAllowed = (): boolean => !!uplink && !stopped && gate.state() !== 'asleep' && screenVisible();
 
@@ -394,10 +428,14 @@ export function startApp(deps: AppDeps): AppHandle {
     polling = true;
     const gen = ++pollGen;
     const issuedAt = clock.now();
-    uplink.pollDialog(lastTurnId).then(
+    pollCancel = null;
+    uplink.pollDialog(lastTurnId, (cancel) => {
+      if (gen === pollGen) pollCancel = cancel;
+    }).then(
       safe(log, 'dialog poll', (turns: DialogTurn[]) => {
         if (gen !== pollGen) return;
         polling = false;
+        pollCancel = null;
         takeTurns(turns);
         const now = clock.now();
         // the server holds an empty poll for 25 s: one answered at once with nothing is not re-issued at once
@@ -408,6 +446,7 @@ export function startApp(deps: AppDeps): AppHandle {
       safe(log, 'dialog poll', () => {
         if (gen !== pollGen) return;
         polling = false;
+        pollCancel = null;
         waitThenPoll();
       }),
     );
@@ -419,24 +458,22 @@ export function startApp(deps: AppDeps): AppHandle {
   });
 
   /**
-   * The screen was hidden: no new poll is issued and a waiting retry is dropped. A poll still open is left to end
-   * by itself (the server holds it at most 25 s; pumpPoll and waitThenPoll then find the screen hidden) and is
-   * taken over if the screen shows again first. It is not cut: the uplink has no per-request cancel, and closing
-   * it would also cancel an alert or snapshot POST in flight, record the cancel as 'offline' and drop the
-   * keep-alive connection.
+   * The screen was hidden, the car fell asleep or the app stopped: a waiting retry is dropped and the poll still
+   * open is ended through its own cancel handle (HttpsClient RequestOptions.cancelHandle). That ends this request
+   * alone: an alert or snapshot POST in flight, the keep-alive connection of the other requests and the link
+   * status are left as they are. Its answer, if one still arrives, is ignored. The next poll starts when the
+   * screen shows again.
    */
-  const pausePoll = (): void => {
+  const stopPoll = (): void => {
     if (pollWait !== null) {
       timers.clearTimeout(pollWait);
       pollWait = null;
     }
-  };
-
-  /** Asleep or stopped: the poll's answer is ignored from now on (uplink.close(), called next, ends the request). */
-  const stopPoll = (): void => {
     pollGen++;
     polling = false;
-    pausePoll();
+    const cancel = pollCancel;
+    pollCancel = null;
+    if (cancel !== null) cancel();
   };
 
   /* ---------- config ---------- */
@@ -568,10 +605,20 @@ export function startApp(deps: AppDeps): AppHandle {
   ctx.ui.onVisible(safe(log, 'visible', (name: string, on: boolean) => {
     if (name !== SCREEN || stopped) return;
     if (on) pumpPoll();
-    else pausePoll();
+    else stopPoll();
   }));
 
+  let testPopupOn = setting(TEST_POPUP_SETTING) === true;
+
   ctx.settings.onChange(safe(log, 'settings', (key: string, value: unknown) => {
+    if (key === TEST_POPUP_SETTING) {
+      const on = value === true;
+      const turnedOn = on && !testPopupOn;
+      testPopupOn = on;
+      // only awake: asleep, the presenter must start no timer (and the screen is dark)
+      if (turnedOn && !stopped && gate.state() !== 'asleep') presenter.presentText(TEST_POPUP_ID, TEXT_TEST_POPUP);
+      return;
+    }
     if (key !== 'latinPopups') return;
     const ascii = value === true;
     if (ascii === state.asciiPopups) return;

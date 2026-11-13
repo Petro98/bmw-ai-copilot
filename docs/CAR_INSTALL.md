@@ -21,8 +21,9 @@ It does:
   service, and the limits you set yourself on the phone), a few seconds after the car's own message;
 - show a Ukrainian screen with three tabs (ПОМІЧНИК, ДАТЧИКИ, СПОВІЩЕННЯ) while you have it open;
 - send your backend, over the Store's internet uplink: a small snapshot at most once a minute while driving,
-  each alert once, and the questions you tap on the screen; while the screen is open it also keeps one request
-  waiting for answers you asked on the phone;
+  each `critical` or `warning` alert as soon as it is raised, its clearing (or its return) with the next of those
+  sends, and the questions you tap on the screen; while the screen is open it also keeps one request waiting
+  for answers you asked on the phone, and ends that request as soon as you leave the screen;
 - keep one small state file in its own data folder (alert memory, your limits, the pairing id and secret).
 
 It never:
@@ -152,6 +153,12 @@ On the car (the app's own settings, «Налаштування»):
   this unit, and **the app cannot detect that**: only you can see it (car check B11). The app's own screen is not
   affected; it has its own Ukrainian font.
 
+- **«Тестове сповіщення»** (test pop-up, off by default): switching it on shows one pop-up «Тестове сповіщення
+  Copilot» about four seconds later, through the same path as an alert: it needs «Спливаючі сповіщення» on (and
+  the phone's switch below), waits while reversing, and follows «Сповіщення латиницею». It is not listed, stored
+  or sent to the phone. The app cannot switch it back off by itself, so it stays on: to see the pop-up again,
+  switch it off and on. It does nothing while the car is parked and asleep. Car check B11 uses it.
+
 On the phone panel, the switch «Вікна на екрані авто» must be on as well: a pop-up appears only when both
 switches are on. The car fetches the phone's switch and your limits when it wakes up and is online, so a change
 on the phone reaches the car on its next drive.
@@ -162,8 +169,8 @@ A passenger watches; the driver does not operate the phone or the screen for the
 
 - **BMW's own messages must win.** Our pop-up waits a few seconds after a Check Control message so that BMW's
   message comes first, and it never shows while reversing. The kit exposes **no pop-up priority**, so whether
-  BMW's warnings are always drawn over ours is not known yet (B11). If our pop-up ever covers or delays a BMW
-  message, stop and uninstall.
+  BMW's warnings are always drawn over ours is not known yet (B11; the switch «Тестове сповіщення» in section 7
+  shows our pop-up on demand, parked). If our pop-up ever covers or delays a BMW message, stop and uninstall.
 - **The screen is operated by touch.** The kit no longer takes over the iDrive controller (by design: no
   controller grab), so the controller may not move between the header tabs and the chips. Tabs and chips need
   the renderer's touch routing (B13). If tapping does nothing, note it; the app keeps working in the background.
@@ -248,7 +255,7 @@ installed the Store, with a battery charger connected.
   wake-on-demand interfaces (`WakeUpOnDemand`, `WodControl`) and the node-state consumer with
   `RegisterShutdownClient`. Our code never references them (a test checks this), and the list is left as the kit
   ships it. What declaring them alone allows or changes on this unit is **not known**: it is an open question
-  for the car checks (B5, B16), not something this guide can call harmless.
+  for the car checks (B18, read with B5 and B16), not something this guide can call harmless.
 - **The pop-up has no priority setting** (section 8).
 - **The diagnostic gate is disabled.** The ДАТЧИКИ tab shows the intake temperature as needing a diagnostic
   read, which is switched off. Nothing in this version can turn it on.

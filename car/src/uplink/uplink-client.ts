@@ -4,6 +4,12 @@
  * Everything it keeps is bounded (240 snapshots, 20 alerts) and nothing is retried inside a request:
  * a failed batch goes back to the front of its buffer and waits for the next interval.
  *
+ * Alerts take two ways into the one queue: sendAlerts() (a raise) sends at once; queueAlerts() (a clearing, a
+ * re-opening) only queues. What is queued goes with the next raise, or from onTick(): while driving in the
+ * same tick as the minute's snapshot batch (so it adds no wake-up of the link of its own), otherwise at most
+ * once per interval. A raise that could not go out at once (offline, a send in flight, a failed send) is not
+ * held for the batch: onTick() sends it as before, on the first online tick at most once per interval.
+ *
  * A 401/403 (and a 4xx to a background send) blocks the device's bearer. The block ends when the device
  * changes or when the wiring calls retry(): the car makes up its own id and secret before the owner has
  * registered them on the pairing page, so its first requests are refused, and registering changes
@@ -62,6 +68,8 @@ export class UplinkClient {
   private lastAlertAttemptAt: number | null = null;
   private batchInFlight = false;
   private alertsInFlight = false;
+  /** A raise (sendAlerts) waits in the alert queue: it is not held for the snapshot batch while driving. */
+  private raiseWaiting = false;
   /** Set by 401/403 or another 4xx: nothing is sent with this bearer until the device changes or retry(). */
   private blocked: { kind: 'unauthorized' | 'client-error'; bearer: string } | null = null;
   private lastOutcome: Outcome | null = null;
@@ -95,21 +103,41 @@ export class UplinkClient {
       const bearer = this.bearer();
       if (bearer === null || !this.http.online()) return;
       const now = this.clock.now();
-      if (power === 'driving' && !this.batchInFlight && this.snapshots.size() > 0 && this.elapsed(this.lastBatchAt, now)) {
+      const driving = power === 'driving';
+      let batchSent = false;
+      if (driving && !this.batchInFlight && this.snapshots.size() > 0 && this.elapsed(this.lastBatchAt, now)) {
         this.sendBatch(bearer, now);
+        batchSent = true;
       }
-      if (!this.alertsInFlight && this.alerts.size() > 0 && this.elapsed(this.lastAlertAttemptAt, now)) {
-        this.flushAlerts(bearer, now);
-      }
+      if (this.alertsInFlight || this.alerts.size() === 0) return;
+      // a waiting raise, or not driving: at most once per interval; driving, clearings alone go with the minute's
+      // batch, or by themselves only when no batch went out for a whole interval
+      const due =
+        batchSent ||
+        (this.elapsed(this.lastAlertAttemptAt, now) && (this.raiseWaiting || !driving || this.elapsed(this.lastBatchAt, now)));
+      if (due) this.flushAlerts(bearer, now);
     } catch (error) {
       this.note(error);
     }
   }
 
-  /** Sends at once when online; otherwise keeps them (the newest 20) for the next successful send. */
+  /**
+   * Keeps them (in the same queue, the newest 20) for the next send, without sending now: for a clearing or a
+   * re-opening, which goes with the next raise or the next batch (see onTick). Never throws.
+   */
+  queueAlerts(events: AlertEvent[]): void {
+    try {
+      for (const event of events) this.alerts.push(event);
+    } catch (error) {
+      this.note(error);
+    }
+  }
+
+  /** Sends at once when online, with whatever was queued before; otherwise keeps them (the newest 20) for the next send. */
   sendAlerts(events: AlertEvent[]): void {
     try {
       for (const event of events) this.alerts.push(event);
+      if (events.length > 0) this.raiseWaiting = true;
       if (this.alerts.size() === 0 || this.alertsInFlight || this.closed) return;
       const bearer = this.bearer();
       if (bearer === null || !this.http.online()) return;
@@ -132,13 +160,35 @@ export class UplinkClient {
     );
   }
 
-  /** One GET /car/v1/dialog (the server waits up to 25 s for a newer turn); the caller decides when to call again. */
-  pollDialog(afterTurnId: string | null): Promise<DialogTurn[]> {
+  /**
+   * One GET /car/v1/dialog (the server waits up to 25 s for a newer turn); the caller decides when to call again.
+   * `cancelHandle`, when given, is called at once with a function that ends this poll alone: the promise then
+   * rejects as `offline` and the link status is left as it was (a cancel is no failure of the link).
+   */
+  pollDialog(afterTurnId: string | null, cancelHandle?: (cancel: () => void) => void): Promise<DialogTurn[]> {
     const query = afterTurnId === null ? '' : '?after=' + encodeURIComponent(afterTurnId);
+    let cancelled = false;
+    let cancelRequest: (() => void) | null = null;
+    const options: RequestOptions = { timeoutMs: DIALOG_POLL_TIMEOUT_MS, longPoll: true };
+    if (typeof cancelHandle === 'function') options.cancelHandle = (fn) => (cancelRequest = fn);
     // on its own connection (HttpsClient), so a held poll does not delay alerts, snapshots or a question
-    return this.call<DialogTurn[]>('GET', CAR_API_PREFIX + '/dialog' + query, null, { timeoutMs: DIALOG_POLL_TIMEOUT_MS, longPoll: true }, (reply) =>
+    const pending = this.call<DialogTurn[]>('GET', CAR_API_PREFIX + '/dialog' + query, null, options, (reply) =>
       isObject(reply) && Array.isArray(reply.turns) ? (reply.turns as DialogTurn[]) : null,
+      () => cancelled,
     );
+    if (typeof cancelHandle === 'function') {
+      try {
+        cancelHandle(() => {
+          if (cancelled) return;
+          cancelled = true;
+          const cancel = cancelRequest;
+          if (cancel !== null) cancel();
+        });
+      } catch (error) {
+        this.note(error);
+      }
+    }
+    return pending;
   }
 
   status(): LinkStatus {
@@ -240,6 +290,9 @@ export class UplinkClient {
     const batch = this.alerts.drain(ALERT_QUEUE_MAX);
     if (batch.length === 0) return;
     const body: CarAlertBatch = { alerts: batch };
+    // the whole queue goes, so a raise waiting in it goes too; it waits again only if this send fails
+    const withRaise = this.raiseWaiting;
+    this.raiseWaiting = false;
     this.alertsInFlight = true;
     this.lastAlertAttemptAt = now;
     this.send(bearer, CAR_API_PREFIX + '/alerts', body).then(
@@ -249,6 +302,7 @@ export class UplinkClient {
       () => {
         this.alertsInFlight = false;
         this.alerts.pushFront(batch);
+        if (withRaise) this.raiseWaiting = true;
       },
     );
   }
@@ -273,7 +327,14 @@ export class UplinkClient {
   }
 
   /** An explicit request: refused at once when unpaired or blocked; the reply's shape is checked. */
-  private call<T>(method: 'GET' | 'POST', path: string, body: unknown, options: RequestOptions | undefined, shape: (reply: unknown) => T | null): Promise<T> {
+  private call<T>(
+    method: 'GET' | 'POST',
+    path: string,
+    body: unknown,
+    options: RequestOptions | undefined,
+    shape: (reply: unknown) => T | null,
+    cancelled: () => boolean = () => false,
+  ): Promise<T> {
     if (this.closed) return Promise.reject(new UplinkError('offline', 'the uplink is closed'));
     let bearer: string | null;
     let paired = false;
@@ -302,6 +363,8 @@ export class UplinkClient {
         return value;
       },
       (error: unknown) => {
+        // ended by its caller: not an outcome of the link, so nothing is recorded or blocked
+        if (cancelled()) throw new UplinkError('offline', 'the request was cancelled');
         throw this.failed(error, used, false);
       },
     );

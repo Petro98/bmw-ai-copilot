@@ -45,6 +45,12 @@ export const TEXT_UNAVAILABLE = 'Недоступно';
 /** A tyre the car sent no pressure for, inside the tyre tile's two-by-two grid (no room for «Недоступно»). */
 export const TEXT_TYRE_UNAVAILABLE = 'н/д';
 
+/**
+ * The pop-up the owner's switch «Тестове сповіщення» (app.json settings key `testPopup`) shows once, so the
+ * BMW pop-up path can be checked on the car without waiting for a real alert (docs/CAR_CHECKLIST.md B11).
+ */
+export const TEXT_TEST_POPUP = 'Тестове сповіщення Copilot';
+
 /** Pairing (shown on the assistant tab until the device is registered on the phone's /pair page). */
 export const PAIRING_LINES: readonly [string, string] = [
   'Відскануйте код камерою телефона.',

@@ -20,6 +20,10 @@
  *     label <name>_TEXT and a button <name>_OK; car/apps/p98_copilot/app.json names ours ALERT_POP.
  *   - The order open, then text is required: text sent before the open is refused (INVALID_MODELID),
  *     .research/jap_sysmon_main.js:88-89.
+ *
+ * presentText() puts a pop-up with a fixed text through the same path (the owner's test switch, car check B11):
+ * the same switch, hold, settle delay and Latin fallback, ranked as a warning, and nothing else of an alert.
+ *
  *   - Priority: build.py writes no pop-up priority property for a "popups" entry (the container gets only
  *     type, widget and stackConsumer="false", build.py:312), and mgu.js has no call to set one, so the kit
  *     exposes none and ours keeps the HMI's default. Whether BMW's own messages still win is car check B11.
@@ -111,10 +115,14 @@ export function popupGates(
 
 const SEVERITY_RANK: Record<string, number> = { critical: 0, warning: 1 };
 
-/** A waiting pop-up; `interrupted` once it was closed by a hold and put back (it is put back only once). */
+/**
+ * A waiting pop-up; `interrupted` once it was closed by a hold and put back (it is put back only once).
+ * `text`, when set, is shown instead of the event's words (presentText).
+ */
 interface Waiting {
   event: AlertEvent;
   interrupted: boolean;
+  text?: string;
 }
 
 type Phase = 'idle' | 'settling' | 'showing';
@@ -165,6 +173,28 @@ export class AlertPresenter {
       if (this.current && this.current.event.id === event.id) return;
       for (const queued of this.queue) if (queued.event.id === event.id) return;
       this.enqueue({ event, interrupted: false });
+      this.pump();
+    } catch (error) {
+      this.warn('popup present', error);
+    }
+  }
+
+  /**
+   * Queues a pop-up with this fixed text, ranked as a warning, through the same gates and settle delay as an
+   * alert; `id` keeps it from waiting or showing twice. Nothing is listed, kept or sent. Never throws.
+   */
+  presentText(id: string, text: string): void {
+    try {
+      if (typeof id !== 'string' || id === '' || typeof text !== 'string' || text === '') return;
+      if (!this.allowed()) return;
+      if (this.current && this.current.event.id === id) return;
+      for (const queued of this.queue) if (queued.event.id === id) return;
+      // only the id and the severity of this stand-in are read (de-duplication, queue rank)
+      const event: AlertEvent = {
+        id, ruleId: id, dedupKey: id, provenance: 'bmw-check-control', severity: 'warning',
+        title: text, detail: null, at: 0, active: true, clearedAt: null,
+      };
+      this.enqueue({ event, interrupted: false, text });
       this.pump();
     } catch (error) {
       this.warn('popup present', error);
@@ -266,7 +296,7 @@ export class AlertPresenter {
     this.current = item;
     this.shownMs = 0;
     this.timer = this.timers.setInterval(this.onCheck, POPUP_CHECK_MS);
-    const text = this.textOf(item.event);
+    const text = this.textOf(item);
     const stale = () => generation !== this.generation;
     this.call('open', () => this.ui.open(POPUP_STATE))
       .then(() => {
@@ -293,8 +323,8 @@ export class AlertPresenter {
     }
   }
 
-  private textOf(event: AlertEvent): string {
-    const text = popupText(event);
+  private textOf(item: Waiting): string {
+    const text = typeof item.text === 'string' ? cutAtWord(item.text, POPUP_TEXT_MAX) : popupText(item.event);
     let ascii: boolean;
     try {
       ascii = this.ascii() === true;
@@ -318,7 +348,7 @@ export class AlertPresenter {
     }
     if (this.held()) {
       const interrupted = this.current;
-      if (interrupted && !interrupted.interrupted) this.enqueue({ event: interrupted.event, interrupted: true });
+      if (interrupted && !interrupted.interrupted) this.enqueue({ event: interrupted.event, interrupted: true, text: interrupted.text });
       this.finish();
       return;
     }

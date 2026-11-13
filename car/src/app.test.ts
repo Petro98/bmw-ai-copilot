@@ -15,7 +15,8 @@ import { IDLE_FALLBACK_MS } from './power/power-gate';
 import { STATE_FILE_NAME } from './state/state-file';
 import { SCREEN } from './ui/screen';
 import { CHIPS_MOVING, CHIPS_PARKED } from './ui/view-model';
-import { UplinkError, type HttpsClient, type UplinkErrorKind } from './uplink/https-client';
+import { TEXT_TEST_POPUP } from './ui/strings.uk';
+import { UplinkError, type HttpsClient, type RequestOptions, type UplinkErrorKind } from './uplink/https-client';
 
 const CONDITION = 'de.bmw.infrastructure.VehicleCondition';
 const CDS = 'de.bmw.infotainment.vehicle.CDS';
@@ -23,6 +24,7 @@ const V2 = 'de.bmw.infotainment.vehicle.Vehicle2';
 const TPMS = 'de.bmw.infotainment.vehicle.TPMS';
 const CCM = 'de.bmw.infotainment.checkcontrol.CheckControlMaster';
 const KOMBI2 = 'de.bmw.infotainment.KombiInterface_2';
+const VI = 'de.bmw.infrastructure.VehicleInformation';
 
 const DATA_DIR = '/data';
 const STATE_PATH = DATA_DIR + '/' + STATE_FILE_NAME;
@@ -111,6 +113,8 @@ function memFs() {
 
 interface Call {
   method: string; path: string; body: unknown; bearer: string; settled: boolean;
+  /** ended through the cancel handle the caller was given (RequestOptions.cancelHandle) */
+  cancelled: boolean;
   resolve(value: unknown): void; reject(error: unknown): void;
 }
 
@@ -135,15 +139,22 @@ function fakeHttp() {
       if (f.throwing) throw new Error('lease unreadable');
       return f.online;
     },
-    request(method: string, path: string, body: unknown, bearer: string): Promise<unknown> {
+    request(method: string, path: string, body: unknown, bearer: string, options?: RequestOptions): Promise<unknown> {
       if (f.throwing) throw new Error('socket exploded');
       return new Promise((resolve, reject) => {
         const call: Call = {
-          method, path, body, bearer, settled: false,
+          method, path, body, bearer, settled: false, cancelled: false,
           resolve: (v) => { if (!call.settled) { call.settled = true; resolve(v); } },
           reject: (e) => { if (!call.settled) { call.settled = true; reject(e); } },
         };
         f.calls.push(call);
+        if (options && options.cancelHandle) {
+          options.cancelHandle(() => {
+            if (call.settled) return;
+            call.cancelled = true;
+            call.reject(new UplinkError('offline', 'the request was cancelled'));
+          });
+        }
         if (!f.online) return call.reject(new UplinkError('offline', 'no lease'));
         if (f.unauthorized) return call.reject(new UplinkError('unauthorized', 'HTTP 401'));
         if (path === '/car/v1/config' && !f.holdConfig) call.resolve({ ownerLimits: { ...NO_LIMITS }, popupsEnabled: true });
@@ -246,6 +257,8 @@ function fakeKit(o: KitOptions = {}) {
     condition: (name: string) => send(CONDITION, 'VehicleCondition', { statusConditionVehicle: name }),
     speed: (kmh: number) => send(V2, 'statusCarSpeed2', { speedVehicleCentreOfGravity: kmh / 0.015625 }),
     rpm: (rpm: number) => send(CDS, 'statusEngineSpeed2', { actualValueRPMEngineCrankshaft: rpm * 4 }),
+    /** the selector in R, or back in D (statusGearboxDrive, car/src/provider/raw-decoders.ts applyGearbox) */
+    reverse: (on: boolean) => send(VI, 'statusGearboxDrive', { statusActualStageDrive: on ? 'R' : 'D' }),
     /** one Check Control message, its text and colour, active or not */
     cc: (id: number, colour: string, active: boolean) => {
       send(KOMBI2, 'ccList', [{ cCIdentifer: id, cCShortName: 'Synthetic message ' + id, cCColor: colour }]);
@@ -329,9 +342,11 @@ async function park(s: Booted): Promise<void> {
   await s.time.run(1000);
 }
 
-function alertPosts(s: Booted): Array<{ id: string; severity: string }> {
-  const out: Array<{ id: string; severity: string }> = [];
-  for (const c of s.net.to('/car/v1/alerts')) for (const a of (c.body as { alerts: Array<{ id: string; severity: string }> }).alerts) out.push(a);
+interface Posted { id: string; severity: string; active: boolean; title: string }
+
+function alertPosts(s: Booted): Posted[] {
+  const out: Posted[] = [];
+  for (const c of s.net.to('/car/v1/alerts')) for (const a of (c.body as { alerts: Posted[] }).alerts) out.push(a);
   return out;
 }
 
@@ -480,6 +495,7 @@ describe('startApp', () => {
     await first.time.run(5000 + POPUP_SETTLE_MS + 1000);
     expect(first.kit.opened.filter((n) => n === POPUP_STATE)).toHaveLength(1);
     expect(alertPosts(first)).toHaveLength(1);
+    const raisedId = alertPosts(first)[0].id;
     first.app.persist();                                       // main.ts does this on the process's exit
     first.app.stop();
 
@@ -489,9 +505,32 @@ describe('startApp', () => {
     second.kit.cc(901, 'YELLOW', true);
     await second.time.run(60_000);
     expect(second.kit.opened).not.toContain(POPUP_STATE);
-    expect(alertPosts(second)).toHaveLength(0);
+    // no new raise: at most the re-opened alert under the id of its first raise, still active
+    for (const posted of alertPosts(second)) expect([posted.id, posted.active]).toEqual([raisedId, true]);
     expect(second.app.inspect().screen.alerts.map((a) => [a.title, a.active])).toEqual([['Synthetic message 901', true]]);
     expect(second.app.inspect().screen.pairUrl).toContain(DEVICE.id);
+  });
+
+  test('restart after a warning went away: its clearing, rebuilt from the key memory, reaches the phone under the raise\'s id', async () => {
+    const fs = memFs();
+    const first = await boot({ fs, state: pairedState() });
+    await drive(first);
+    first.kit.cc(901, 'YELLOW', true);
+    await first.time.run(5000);
+    expect(alertPosts(first).map((a) => [a.severity, a.active])).toEqual([['warning', true]]);
+    const raisedId = alertPosts(first)[0].id;
+    first.app.persist();
+    first.app.stop();
+
+    // a new process, the message gone by the first evaluation: the engine clears it silently, the runner rebuilds it
+    const second = await boot({ fs, time: fakeTime(first.time.clock.now() + 120_000) });
+    await drive(second);
+    second.kit.cc(901, 'YELLOW', false);
+    await second.time.run(2000);
+    expect(second.net.to('/car/v1/alerts')).toHaveLength(0);   // a clearing causes no request of its own
+    await second.time.run(60_000);
+    expect(alertPosts(second).map((a) => [a.id, a.active, a.severity, a.title])).toEqual([[raisedId, false, 'info', '']]);
+    expect(second.kit.opened).not.toContain(POPUP_STATE);
   });
 
   test('a corrupt or missing state file starts clean, with a new device, and logs nothing of its content', async () => {
@@ -577,26 +616,28 @@ describe('startApp', () => {
     expect(s.app.inspect().screen.lastTurn).toEqual(turn);
     expect(s.net.open('/car/v1/dialog').map((c) => c.path)).toEqual(['/car/v1/dialog?after=t-9']);
 
-    // hidden: the held poll is left to end by itself (the server holds it at most 25 s); no new one is issued
+    // hidden: the held poll is cancelled at once, alone (the uplink is not closed, the link is not marked failed)
     const closes = s.net.f.closes;
     const held = s.net.open('/car/v1/dialog');
+    expect(s.app.inspect().screen.link).toBe('ok');
     s.kit.setVisible(false);
     await flush();
     expect(s.net.f.closes).toBe(closes);
-    expect(s.net.open('/car/v1/dialog')).toEqual(held);
-    // shown again while it is still open: that same poll goes on, no second one
-    s.kit.setVisible(true);
-    await flush();
-    expect(s.net.open('/car/v1/dialog')).toEqual(held);
-    s.kit.setVisible(false);
-    await flush();
-    await s.time.run(25_000);
-    held[0].resolve({ turns: [] });
-    await flush();
+    expect(held[0].cancelled).toBe(true);
     expect(s.net.open('/car/v1/dialog')).toHaveLength(0);
+    expect(s.app.inspect().screen.link).toBe('ok');
+    expect(s.time.pending()).toEqual(TICK);                    // no retry waits for a hidden screen
     await s.time.run(30_000);
     expect(s.net.open('/car/v1/dialog')).toHaveLength(0);
     expect(s.net.to('/car/v1/dialog')).toHaveLength(2);
+    // shown again: one new poll from the last turn seen
+    s.kit.setVisible(true);
+    await flush();
+    expect(s.net.open('/car/v1/dialog').map((c) => c.path)).toEqual(['/car/v1/dialog?after=t-9']);
+    s.kit.setVisible(false);
+    await flush();
+    expect(s.net.open('/car/v1/dialog')).toHaveLength(0);
+    expect(s.net.to('/car/v1/dialog')).toHaveLength(3);
 
     s.kit.setVisible(true);
     await flush();
@@ -742,5 +783,120 @@ describe('startApp', () => {
     phoneOff.kit.cc(907, 'RED', true);
     await phoneOff.time.run(5000 + POPUP_SETTLE_MS + 1000);
     expect(phoneOff.kit.opened).not.toContain(POPUP_STATE);
+  });
+
+  test('a clearing and a re-opening reach the phone under the raise\'s id, riding with the next snapshot batch; an info clearing stays local', async () => {
+    const s = await boot({ state: pairedState() });
+    await drive(s);
+    s.kit.send(KOMBI2, 'ccList', [
+      { cCIdentifer: 901, cCShortName: 'Synthetic message 901', cCColor: 'YELLOW' },
+      { cCIdentifer: 902, cCShortName: 'Synthetic message 902', cCColor: 'GREEN' },
+    ]);
+    s.kit.send(CCM, 'basicList', [{ ccmId: 901, activeState: 'AKTIV' }, { ccmId: 902, activeState: 'AKTIV' }]);
+    await s.time.run(5000);                                   // the Check Control rule's 4 s dwell
+    const raised = alertPosts(s);
+    expect(raised.map((a) => [a.severity, a.active])).toEqual([['warning', true]]);   // sent at once, alone
+    const id = raised[0].id;
+
+    // both messages go away: the warning's clearing waits for the next snapshot batch and goes with it
+    s.kit.send(CCM, 'basicList', [{ ccmId: 901, activeState: 'INAKTIV' }, { ccmId: 902, activeState: 'INAKTIV' }]);
+    await s.time.run(2000);
+    expect(s.app.inspect().screen.alerts.every((a) => !a.active)).toBe(true);
+    expect(s.app.inspect().queued.alerts).toBe(1);
+    expect(s.net.to('/car/v1/alerts')).toHaveLength(1);       // no request of its own
+    await s.time.run(60_000);
+    const posts = s.net.to('/car/v1/alerts');
+    expect(posts).toHaveLength(2);
+    const at = s.net.f.calls.indexOf(posts[1]);
+    expect(s.net.f.calls[at - 1].path).toBe('/car/v1/snapshots');   // in the same tick as the minute's batch
+    expect((posts[1].body as { alerts: Posted[] }).alerts.map((a) => [a.id, a.active])).toEqual([[id, false]]);
+    expect(s.app.inspect().queued.alerts).toBe(0);
+
+    // the warning comes back inside its cooldown: re-opened under the same id, sent with a batch, not popped up again
+    const popups = s.kit.opened.filter((n) => n === POPUP_STATE).length;
+    s.kit.send(CCM, 'basicList', [{ ccmId: 901, activeState: 'AKTIV' }]);
+    await s.time.run(5000);
+    expect(s.net.to('/car/v1/alerts')).toHaveLength(2);
+    await s.time.run(60_000);
+    const last = s.net.to('/car/v1/alerts');
+    expect(last).toHaveLength(3);
+    expect((last[2].body as { alerts: Posted[] }).alerts.map((a) => [a.id, a.active])).toEqual([[id, true]]);
+    expect(s.kit.opened.filter((n) => n === POPUP_STATE)).toHaveLength(popups);
+    for (const posted of alertPosts(s)) expect(posted.severity).not.toBe('info');
+  });
+
+  test('the test switch shows one pop-up through the same gates, and stores, lists and sends nothing', async () => {
+    const s = await boot({ state: pairedState(), settings: { testPopup: false } });
+    await drive(s);
+    const writes = s.fs.stateWrites();
+    const shownTexts = () => s.kit.texts.filter(([n]) => n === POPUP_TEXT_LABEL).map(([, t]) => t);
+
+    s.kit.setSetting('testPopup', true);
+    await s.time.run(POPUP_SETTLE_MS - 500);
+    expect(s.kit.opened).not.toContain(POPUP_STATE);           // after the same settle delay as an alert
+    await s.time.run(1000);
+    expect(s.kit.opened.filter((n) => n === POPUP_STATE)).toHaveLength(1);
+    expect(shownTexts()).toEqual([TEXT_TEST_POPUP]);
+    expect(TEXT_TEST_POPUP).toBe('Тестове сповіщення Copilot');
+    await s.time.run(20_000);
+    expect(s.app.inspect().screen.alerts).toEqual([]);
+    expect(s.app.inspect().history).toBe(0);
+    expect(s.app.inspect().queued.alerts).toBe(0);
+    expect(alertPosts(s)).toHaveLength(0);
+    expect(s.fs.stateWrites()).toBe(writes);
+
+    // on stays on: only an off-to-on change shows it again
+    s.kit.setSetting('testPopup', true);
+    await s.time.run(POPUP_SETTLE_MS + 1000);
+    expect(s.kit.opened.filter((n) => n === POPUP_STATE)).toHaveLength(1);
+    s.kit.setSetting('testPopup', false);
+    await s.time.run(POPUP_SETTLE_MS + 1000);
+    expect(s.kit.opened.filter((n) => n === POPUP_STATE)).toHaveLength(1);
+
+    // the Latin switch applies to it as well
+    s.kit.setSetting('latinPopups', true);
+    s.kit.setSetting('testPopup', true);
+    await s.time.run(POPUP_SETTLE_MS + 1000);
+    expect(s.kit.opened.filter((n) => n === POPUP_STATE)).toHaveLength(2);
+    const latin = shownTexts()[1];
+    expect(latin).toContain('Copilot');
+    expect(latin).toMatch(/^Testove spovishchennia/);
+    expect(latin).not.toMatch(/[А-Яа-яІіЇїЄєҐґ]/);
+
+    // pop-ups switched off: nothing
+    s.kit.setSetting('testPopup', false);
+    s.kit.setSetting('popups', false);
+    s.kit.setSetting('testPopup', true);
+    await s.time.run(POPUP_SETTLE_MS + 1000);
+    expect(s.kit.opened.filter((n) => n === POPUP_STATE)).toHaveLength(2);
+
+    // asleep: no effect, no timer, and nothing shows up on waking
+    s.kit.setSetting('popups', true);
+    s.kit.setSetting('testPopup', false);
+    await park(s);
+    s.kit.setSetting('testPopup', true);
+    expect(s.time.pending()).toEqual([]);
+    await drive(s);
+    await s.time.run(POPUP_SETTLE_MS + 1000);
+    expect(s.kit.opened.filter((n) => n === POPUP_STATE)).toHaveLength(2);
+
+    // switched on before the app started: no pop-up at start
+    const on = await boot({ state: pairedState(), settings: { testPopup: true } });
+    await on.time.run(POPUP_SETTLE_MS + 1000);
+    expect(on.kit.opened).not.toContain(POPUP_STATE);
+  });
+
+  test('the test pop-up waits while reversing, like an alert', async () => {
+    const s = await boot({ state: pairedState() });
+    await drive(s);
+    s.kit.reverse(true);
+    await s.time.run(1000);
+    s.kit.setSetting('testPopup', true);
+    await s.time.run(POPUP_SETTLE_MS + 3000);
+    expect(s.kit.opened).not.toContain(POPUP_STATE);
+    s.kit.reverse(false);
+    await s.time.run(2000);
+    expect(s.kit.opened.filter((n) => n === POPUP_STATE)).toHaveLength(1);
+    expect(s.kit.texts.filter(([n]) => n === POPUP_TEXT_LABEL).map(([, t]) => t)).toEqual([TEXT_TEST_POPUP]);
   });
 });

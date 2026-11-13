@@ -314,6 +314,41 @@ test('the dialog long-poll gets its own single-socket agent, created on first us
   expect(https.agents.map((a) => a.destroyed)).toEqual([true, true]);
 });
 
+test('a request given a cancel handle can be ended alone: rejected as offline, aborted, its timer cleared, the rest untouched', async () => {
+  const https = fakeHttps(() => {});
+  const timers = trackedTimers();
+  const c = client(https, { timers: timers.api });
+  let cancel: (() => void) | null = null;
+  const poll = kindOf(c.request('GET', '/car/v1/dialog', null, 'd.s', { timeoutMs: 35_000, longPoll: true, cancelHandle: (fn) => (cancel = fn) }));
+  const alerts = c.request('POST', '/car/v1/alerts', { alerts: [] }, 'd.s');
+  expect(cancel).not.toBeNull();
+  expect(timers.pending()).toBe(2);
+  cancel!();
+  expect(await poll).toBe('offline');
+  expect(https.exchanges[0].req.aborted).toBe(true);
+  expect(https.exchanges[1].req.aborted).toBe(false);
+  expect(timers.pending()).toBe(1);
+  expect(https.agents.map((a) => a.destroyed)).toEqual([false, false]);
+  await new Promise((resolve) => setImmediate(resolve));
+  https.exchanges[1].respond(204);
+  await expect(alerts).resolves.toBeUndefined();
+  expect(() => cancel!()).not.toThrow();                      // after it settled: nothing happens
+  // the client is still open: the next poll goes out on the same poll agent
+  const next = c.request('GET', '/car/v1/dialog', null, 'd.s', { timeoutMs: 35_000, longPoll: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  https.exchanges[2].respond(200, '{"turns":[]}');
+  await expect(next).resolves.toEqual({ turns: [] });
+  expect(https.exchanges[2].options.agent).toBe(https.exchanges[0].options.agent);
+  expect(timers.pending()).toBe(0);
+
+  // a handle that throws does not break the request
+  const ok = fakeHttps((x) => x.respond(204));
+  const handleThrows = () => {
+    throw new Error('caller bug');
+  };
+  await expect(client(ok).request('GET', '/car/v1/dialog', null, 'd.s', { longPoll: true, cancelHandle: handleThrows })).resolves.toBeUndefined();
+});
+
 // ---- Node's real Agent against a local server ---------------------------------------------------
 
 /** A timer API that knows how many of its timers are still pending. */

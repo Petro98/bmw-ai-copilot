@@ -162,6 +162,41 @@ describe('AlertPresenter', () => {
     expect(ui.calls).toEqual(['open ALERT_POP', 'text ALERT_POP_TEXT Авто повідомляє: Тиск у шинах: задня ліва']);
   });
 
+  test('presentText shows its own text with the same settle delay and gates as an alert, once while it waits or shows', async () => {
+    let on = true;
+    let latin = false;
+    const { ui, timers, presenter } = setup({ enabled: () => on, ascii: () => latin });
+    presenter.presentText('test-popup', 'Тестове сповіщення Copilot');
+    presenter.presentText('test-popup', 'Тестове сповіщення Copilot');    // already waiting: not twice
+    timers.advance(POPUP_SETTLE_MS - 1);
+    await flush();
+    expect(ui.calls).toEqual([]);
+    timers.advance(1);
+    await flush();
+    expect(ui.calls).toEqual(['open ALERT_POP', 'text ALERT_POP_TEXT Тестове сповіщення Copilot']);
+    presenter.presentText('test-popup', 'Тестове сповіщення Copilot');    // already up: not again
+    timers.advance(POPUP_VISIBLE_MS + POPUP_SETTLE_MS);
+    await flush();
+    expect(shown(ui)).toEqual(['Тестове сповіщення Copilot']);
+    expect(timers.pending()).toBe(0);
+
+    latin = true;
+    presenter.presentText('test-popup', 'Тестове сповіщення Copilot');
+    timers.advance(POPUP_SETTLE_MS);
+    await flush();
+    expect(shown(ui)[1]).toMatch(/^Testove spovishchennia Copilot$/);
+    presenter.closeAll();
+    await flush();
+
+    on = false;
+    presenter.presentText('test-popup', 'Тестове сповіщення Copilot');
+    timers.advance(POPUP_SETTLE_MS + POPUP_VISIBLE_MS);
+    await flush();
+    expect(shown(ui)).toHaveLength(2);
+    expect(timers.pending()).toBe(0);
+    expect(() => presenter.presentText(null as unknown as string, null as unknown as string)).not.toThrow();
+  });
+
   test('the pop-up closes by itself after POPUP_VISIBLE_MS, and no timer is left behind', async () => {
     const { ui, timers, presenter } = setup();
     presenter.present(alert('warning', 'A'));

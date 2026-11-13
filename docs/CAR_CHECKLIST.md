@@ -217,7 +217,12 @@ built and installed. Remove it afterwards if it is not the final app.
   log the first raw value of each catalogue field; log the raw gear values (both
   `statusGearboxDrive` and `DataPowerTrain2`) in P, R, N, D and in each gear; log the engine type
   field (`Vehicle2.statusVehiclePartType.typeEngine`).
-- **Record:** present or missing for every catalogue field; the raw gear values; the engine type.
+- **If the Store refuses the install:** when the Store's build or install reports the 12 V charge
+  field (`statusBattery2` of the CDS interface) or its interface as missing, publish again with the
+  fallback `node car/scripts/publish-car.mjs --drop-reading battery12vCharge`, push and install again
+  (`docs/CAR_INSTALL.md` section 10). The ДАТЧИКИ tab then shows the 12 V tile as «Недоступно».
+- **Record:** present or missing for every catalogue field; the raw gear values; the engine type;
+  whether the install needed the 12 V fallback.
 - **Why:** no G01 signal catalogue is published; missing fields must show as unavailable, never as
   zero. Settles H-13 and part of H-1.
 - **Approval:** Install.
@@ -244,11 +249,15 @@ built and installed. Remove it afterwards if it is not the final app.
 
 ### B9. The app's own resource figures
 
-- **Do:** the app logs memory (RSS, heap) and CPU time deltas once a minute over a 30-minute drive
-  and 30 minutes idle with the screen closed, and once with its screen open; compare iDrive
-  Monitor with A5. After a few days, check the size of its data folder.
-- **Record:** the figures; the renderer's log lines (GPU frames, not software PNG frames); "ms per
-  frame" lines; data folder size.
+- **Do:** while the car is awake the app logs at most one self-measurement line every ten minutes,
+  for example `self: rss=41MB heap=12MB cpu=0.6%` (`rss`: the process's memory now; `heap`: its
+  JavaScript part; `cpu`: its share of one core since the previous line). Read these lines over a
+  60-minute drive and 30 minutes idle with the screen closed, and once with its screen open, from
+  its log file `p98_copilot.log` in its data folder (needs read-only shell access, A11) as
+  `docs/CAR_INSTALL.md` section 9 explains; without that access, read the app's memory in iDrive
+  Monitor. Compare with A5. After a few days, check the size of its data folder.
+- **Record:** the `self:` figures and how `rss` changes from line to line; the renderer's log lines
+  (GPU frames, not software PNG frames); data folder size.
 - **Why:** the budgets in `ARCHITECTURE.md` (≤ 60 MB steady RSS, zero growth, no flash history)
   are targets until measured. Settles H-6 in part.
 - **Approval:** Install.
@@ -266,11 +275,18 @@ built and installed. Remove it afterwards if it is not the final app.
 
 ### B11. Our pop-up in the car
 
-- **Do:** with the screen closed, let the test app raise a test pop-up (a button in its settings),
-  once with navigation in front and once with Android Auto in front; then repeat B10 and watch
-  that BMW's own message appears first.
+- **Do:** in the app's settings («Налаштування») turn the switch «Тестове сповіщення» on (if it is
+  already on, off and on again: only switching it on shows the pop-up). About four seconds later the
+  app shows one pop-up «Тестове сповіщення Copilot» through the same path as an alert (it needs
+  «Спливаючі сповіщення» on, and it waits while reversing); it is not listed, stored or sent to the
+  phone. Use the four seconds to bring navigation to the front, and repeat with Android Auto in
+  front. Then repeat B10 and watch that BMW's own Check Control message appears first and is never
+  covered by ours: the kit exposes no pop-up priority, so this can only be seen on the car.
+- **If the pop-up shows blank or wrong text** (empty boxes, gaps, missing Ukrainian letters): turn on
+  «Сповіщення латиницею» and trigger the test pop-up again; it should read «Testove spovishchennia
+  Copilot».
 - **Record:** whether it shows, how long, whether BMW's messages take precedence, whether
-  Ukrainian letters `і ї є ґ` display in the pop-up or the Latin fallback is needed.
+  Ukrainian letters `і ї є ґ` display in the pop-up or the Latin text switch is needed.
 - **Why:** phase 4's exit depends on this; BMW's warnings must never be hidden or delayed.
   Settles H-10, H-11.
 - **Approval:** Install.
@@ -285,9 +301,13 @@ built and installed. Remove it afterwards if it is not the final app.
 
 ### B13. Touch on the drawn screen
 
-- **Do:** tap a drawn button in the test app (and, for comparison, in an app already installed).
-- **Record:** whether the tap reaches the app.
-- **Why:** topic chips on the iDrive screen need the Store renderer's touch routing. Settles H-12.
+- **Do:** on the app's screen tap each header tab (ПОМІЧНИК, ДАТЧИКИ, СПОВІЩЕННЯ) and, parked, one
+  question chip on the ПОМІЧНИК tab (and, for comparison, a drawn button in an app already
+  installed). The screen is operated by touch: the kit no longer takes over the iDrive controller,
+  so the controller may not move between the tabs and chips.
+- **Record:** whether each tap reaches the app (the tab changes; the chip shows «Готую відповідь…»).
+- **Why:** the tabs and the topic chips on the iDrive screen need the Store renderer's touch routing.
+  Settles H-12.
 - **Approval:** Install.
 
 ### B14. One request to the backend over the uplink
@@ -325,6 +345,20 @@ built and installed. Remove it afterwards if it is not the final app.
 - **Record:** yes or no for each.
 - **Why:** a RAM-backed location could hold debug logs without flash wear.
 - **Approval:** Install.
+
+### B18. Platform proxies in the package manifest (open question)
+
+- **Do:** nothing beyond B5 and B16; read their results with this question in mind. The kit's build
+  (`car/kit/tools/build.py`, `PLATFORM_PROXIES`) declares, in every app's SOME/IP manifest, the
+  platform interfaces BMW's own apps declare, among them the wake-on-demand interfaces
+  (`WakeUpOnDemand`, `WodControl`) and the node-state consumer with `RegisterShutdownClient`. Our
+  code never references them (a test checks this) and the list is left as the kit ships it.
+- **Record:** whether, with the app installed, the head unit stays awake longer after locking or
+  wakes on its own (B5, B16), and anything the Store or the service station can say about what
+  these declarations allow.
+- **Why:** what declaring them alone allows or changes on this unit is not known; it is not
+  assumed to be harmless.
+- **Approval:** Install (same app).
 
 ---
 
@@ -484,6 +518,7 @@ decision, in which case it gets its own written procedure first.
 | B15 | — | claudeapi, ui, mcopilot |
 | B16 | 13 | footprint, telemetry, issues, mcopilot |
 | B17 | — | lifecycle |
+| B18 | — | lifecycle |
 | C1 | — | telemetry |
 | C2 | 14 | telemetry, footprint, mcopilot |
 | C3 | — | telemetry, footprint |

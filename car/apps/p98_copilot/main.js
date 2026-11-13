@@ -1118,6 +1118,34 @@ var AlertPresenter = class {
       this.warn("popup present", error);
     }
   }
+  /**
+   * Queues a pop-up with this fixed text, ranked as a warning, through the same gates and settle delay as an
+   * alert; `id` keeps it from waiting or showing twice. Nothing is listed, kept or sent. Never throws.
+   */
+  presentText(id, text2) {
+    try {
+      if (typeof id !== "string" || id === "" || typeof text2 !== "string" || text2 === "") return;
+      if (!this.allowed()) return;
+      if (this.current && this.current.event.id === id) return;
+      for (const queued of this.queue) if (queued.event.id === id) return;
+      const event = {
+        id,
+        ruleId: id,
+        dedupKey: id,
+        provenance: "bmw-check-control",
+        severity: "warning",
+        title: text2,
+        detail: null,
+        at: 0,
+        active: true,
+        clearedAt: null
+      };
+      this.enqueue({ event, interrupted: false, text: text2 });
+      this.pump();
+    } catch (error) {
+      this.warn("popup present", error);
+    }
+  }
   /** Closes the pop-up if one is up, drops every waiting one and leaves no timer. Never throws. */
   closeAll() {
     try {
@@ -1205,7 +1233,7 @@ var AlertPresenter = class {
     this.current = item;
     this.shownMs = 0;
     this.timer = this.timers.setInterval(this.onCheck, POPUP_CHECK_MS);
-    const text2 = this.textOf(item.event);
+    const text2 = this.textOf(item);
     const stale = () => generation !== this.generation;
     this.call("open", () => this.ui.open(POPUP_STATE)).then(() => {
       if (stale()) {
@@ -1227,8 +1255,8 @@ var AlertPresenter = class {
       return Promise.reject(new Error(what + ": " + describe2(error)));
     }
   }
-  textOf(event) {
-    const text2 = popupText(event);
+  textOf(item) {
+    const text2 = typeof item.text === "string" ? cutAtWord(item.text, POPUP_TEXT_MAX) : popupText(item.event);
     let ascii;
     try {
       ascii = this.ascii() === true;
@@ -1251,7 +1279,7 @@ var AlertPresenter = class {
     }
     if (this.held()) {
       const interrupted = this.current;
-      if (interrupted && !interrupted.interrupted) this.enqueue({ event: interrupted.event, interrupted: true });
+      if (interrupted && !interrupted.interrupted) this.enqueue({ event: interrupted.event, interrupted: true, text: interrupted.text });
       this.finish();
       return;
     }
@@ -2273,6 +2301,7 @@ var TEXT_PENDING = "Готую відповідь…";
 var TEXT_NO_ALERTS = "Сповіщень немає.";
 var TEXT_UNAVAILABLE = "Недоступно";
 var TEXT_TYRE_UNAVAILABLE = "н/д";
+var TEXT_TEST_POPUP = "Тестове сповіщення Copilot";
 var PAIRING_LINES = [
   "Відскануйте код камерою телефона.",
   "На сторінці, що відкриється, підтвердьте підключення цього авто."
@@ -4098,6 +4127,17 @@ var HttpsClient = class {
         if (error !== null) reject(error);
         else resolve(value);
       };
+      if (options !== void 0 && typeof options.cancelHandle === "function") {
+        const cancelThis = () => {
+          if (settled) return;
+          finish(new UplinkError("offline", "the request was cancelled"));
+          abortRequest(req);
+        };
+        try {
+          options.cancelHandle(cancelThis);
+        } catch (e) {
+        }
+      }
       const generation = this.generation;
       if (generation.closed) return finish(new UplinkError("offline", "the uplink is closed"));
       const target = this.target;
@@ -4303,6 +4343,8 @@ var UplinkClient = class {
     this.lastAlertAttemptAt = null;
     this.batchInFlight = false;
     this.alertsInFlight = false;
+    /** A raise (sendAlerts) waits in the alert queue: it is not held for the snapshot batch while driving. */
+    this.raiseWaiting = false;
     /** Set by 401/403 or another 4xx: nothing is sent with this bearer until the device changes or retry(). */
     this.blocked = null;
     this.lastOutcome = null;
@@ -4331,20 +4373,35 @@ var UplinkClient = class {
       const bearer = this.bearer();
       if (bearer === null || !this.http.online()) return;
       const now = this.clock.now();
-      if (power === "driving" && !this.batchInFlight && this.snapshots.size() > 0 && this.elapsed(this.lastBatchAt, now)) {
+      const driving = power === "driving";
+      let batchSent = false;
+      if (driving && !this.batchInFlight && this.snapshots.size() > 0 && this.elapsed(this.lastBatchAt, now)) {
         this.sendBatch(bearer, now);
+        batchSent = true;
       }
-      if (!this.alertsInFlight && this.alerts.size() > 0 && this.elapsed(this.lastAlertAttemptAt, now)) {
-        this.flushAlerts(bearer, now);
-      }
+      if (this.alertsInFlight || this.alerts.size() === 0) return;
+      const due = batchSent || this.elapsed(this.lastAlertAttemptAt, now) && (this.raiseWaiting || !driving || this.elapsed(this.lastBatchAt, now));
+      if (due) this.flushAlerts(bearer, now);
     } catch (error) {
       this.note(error);
     }
   }
-  /** Sends at once when online; otherwise keeps them (the newest 20) for the next successful send. */
+  /**
+   * Keeps them (in the same queue, the newest 20) for the next send, without sending now: for a clearing or a
+   * re-opening, which goes with the next raise or the next batch (see onTick). Never throws.
+   */
+  queueAlerts(events) {
+    try {
+      for (const event of events) this.alerts.push(event);
+    } catch (error) {
+      this.note(error);
+    }
+  }
+  /** Sends at once when online, with whatever was queued before; otherwise keeps them (the newest 20) for the next send. */
   sendAlerts(events) {
     try {
       for (const event of events) this.alerts.push(event);
+      if (events.length > 0) this.raiseWaiting = true;
       if (this.alerts.size() === 0 || this.alertsInFlight || this.closed) return;
       const bearer = this.bearer();
       if (bearer === null || !this.http.online()) return;
@@ -4372,16 +4429,38 @@ var UplinkClient = class {
       (reply) => isObject2(reply) && isObject2(reply.ownerLimits) && typeof reply.popupsEnabled === "boolean" ? reply : null
     );
   }
-  /** One GET /car/v1/dialog (the server waits up to 25 s for a newer turn); the caller decides when to call again. */
-  pollDialog(afterTurnId) {
+  /**
+   * One GET /car/v1/dialog (the server waits up to 25 s for a newer turn); the caller decides when to call again.
+   * `cancelHandle`, when given, is called at once with a function that ends this poll alone: the promise then
+   * rejects as `offline` and the link status is left as it was (a cancel is no failure of the link).
+   */
+  pollDialog(afterTurnId, cancelHandle) {
     const query = afterTurnId === null ? "" : "?after=" + encodeURIComponent(afterTurnId);
-    return this.call(
+    let cancelled = false;
+    let cancelRequest = null;
+    const options = { timeoutMs: DIALOG_POLL_TIMEOUT_MS, longPoll: true };
+    if (typeof cancelHandle === "function") options.cancelHandle = (fn) => cancelRequest = fn;
+    const pending = this.call(
       "GET",
       CAR_API_PREFIX + "/dialog" + query,
       null,
-      { timeoutMs: DIALOG_POLL_TIMEOUT_MS, longPoll: true },
-      (reply) => isObject2(reply) && Array.isArray(reply.turns) ? reply.turns : null
+      options,
+      (reply) => isObject2(reply) && Array.isArray(reply.turns) ? reply.turns : null,
+      () => cancelled
     );
+    if (typeof cancelHandle === "function") {
+      try {
+        cancelHandle(() => {
+          if (cancelled) return;
+          cancelled = true;
+          const cancel = cancelRequest;
+          if (cancel !== null) cancel();
+        });
+      } catch (error) {
+        this.note(error);
+      }
+    }
+    return pending;
   }
   status() {
     try {
@@ -4475,6 +4554,8 @@ var UplinkClient = class {
     const batch = this.alerts.drain(ALERT_QUEUE_MAX);
     if (batch.length === 0) return;
     const body = { alerts: batch };
+    const withRaise = this.raiseWaiting;
+    this.raiseWaiting = false;
     this.alertsInFlight = true;
     this.lastAlertAttemptAt = now;
     this.send(bearer, CAR_API_PREFIX + "/alerts", body).then(
@@ -4484,6 +4565,7 @@ var UplinkClient = class {
       () => {
         this.alertsInFlight = false;
         this.alerts.pushFront(batch);
+        if (withRaise) this.raiseWaiting = true;
       }
     );
   }
@@ -4506,7 +4588,7 @@ var UplinkClient = class {
     );
   }
   /** An explicit request: refused at once when unpaired or blocked; the reply's shape is checked. */
-  call(method, path2, body, options, shape) {
+  call(method, path2, body, options, shape, cancelled = () => false) {
     if (this.closed) return Promise.reject(new UplinkError("offline", "the uplink is closed"));
     let bearer;
     let paired = false;
@@ -4535,6 +4617,7 @@ var UplinkClient = class {
         return value;
       },
       (error) => {
+        if (cancelled()) throw new UplinkError("offline", "the request was cancelled");
         throw this.failed(error, used, false);
       }
     );
@@ -4571,6 +4654,8 @@ var CONFIG_RETRY_MS = 6e4;
 var LISTED_MAX = 20;
 var DEVICE_ID_BYTES = 12;
 var DEVICE_SECRET_BYTES = 32;
+var TEST_POPUP_SETTING = "testPopup";
+var TEST_POPUP_ID = "copilot-test-popup";
 var TEXT_NO_SERVER = "Немає зв'язку з сервером";
 var TEXT_CLOCK = "Годинник головного блока неправильний";
 var TEXT_REFUSED = "Сервер відхилив запит";
@@ -4597,6 +4682,10 @@ var NO_DISK = {
 };
 function isTurn(v) {
   return typeof v === "object" && v !== null && typeof v.id === "string";
+}
+function uploads(event) {
+  if (event.severity === "critical" || event.severity === "warning") return true;
+  return event.active === false && event.title === "";
 }
 function sameJson(a, b) {
   try {
@@ -4748,13 +4837,18 @@ function startApp(deps) {
     limits: () => state.limits,
     clock: clock2,
     onEvents: (events) => {
-      const send = [];
+      const upload = [];
+      let raised = false;
       for (const event of events) {
         list(event);
         presenter.present(event);
-        if (event.active && !isReopened(event) && (event.severity === "critical" || event.severity === "warning")) send.push(event);
+        if (!uploads(event)) continue;
+        upload.push(event);
+        if (event.active && !isReopened(event)) raised = true;
       }
-      if (uplink && send.length > 0) uplink.sendAlerts(send);
+      if (!uplink || upload.length === 0) return;
+      if (raised) uplink.sendAlerts(upload);
+      else uplink.queueAlerts(upload);
     }
   });
   let lastTurn = null;
@@ -4814,6 +4908,7 @@ function startApp(deps) {
   let polling = false;
   let pollGen = 0;
   let pollWait = null;
+  let pollCancel = null;
   const pollAllowed = () => !!uplink && !stopped && gate.state() !== "asleep" && screenVisible();
   const takeTurns = (turns) => {
     if (!Array.isArray(turns) || turns.length === 0) return;
@@ -4832,10 +4927,14 @@ function startApp(deps) {
     polling = true;
     const gen = ++pollGen;
     const issuedAt = clock2.now();
-    uplink.pollDialog(lastTurnId).then(
+    pollCancel = null;
+    uplink.pollDialog(lastTurnId, (cancel) => {
+      if (gen === pollGen) pollCancel = cancel;
+    }).then(
       safe(log, "dialog poll", (turns) => {
         if (gen !== pollGen) return;
         polling = false;
+        pollCancel = null;
         takeTurns(turns);
         const now = clock2.now();
         const quick = (!Array.isArray(turns) || turns.length === 0) && now >= issuedAt && now - issuedAt < POLL_RETRY_MS;
@@ -4845,6 +4944,7 @@ function startApp(deps) {
       safe(log, "dialog poll", () => {
         if (gen !== pollGen) return;
         polling = false;
+        pollCancel = null;
         waitThenPoll();
       })
     );
@@ -4853,16 +4953,16 @@ function startApp(deps) {
     pollWait = null;
     pumpPoll();
   });
-  const pausePoll = () => {
+  const stopPoll = () => {
     if (pollWait !== null) {
       timers2.clearTimeout(pollWait);
       pollWait = null;
     }
-  };
-  const stopPoll = () => {
     pollGen++;
     polling = false;
-    pausePoll();
+    const cancel = pollCancel;
+    pollCancel = null;
+    if (cancel !== null) cancel();
   };
   let configWanted = true;
   let configBusy = false;
@@ -4975,9 +5075,17 @@ function startApp(deps) {
   ctx.ui.onVisible(safe(log, "visible", (name, on) => {
     if (name !== SCREEN || stopped) return;
     if (on) pumpPoll();
-    else pausePoll();
+    else stopPoll();
   }));
+  let testPopupOn = setting(TEST_POPUP_SETTING) === true;
   ctx.settings.onChange(safe(log, "settings", (key, value) => {
+    if (key === TEST_POPUP_SETTING) {
+      const on = value === true;
+      const turnedOn = on && !testPopupOn;
+      testPopupOn = on;
+      if (turnedOn && !stopped && gate.state() !== "asleep") presenter.presentText(TEST_POPUP_ID, TEXT_TEST_POPUP);
+      return;
+    }
     if (key !== "latinPopups") return;
     const ascii = value === true;
     if (ascii === state.asciiPopups) return;

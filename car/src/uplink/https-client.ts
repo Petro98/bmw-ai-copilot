@@ -6,7 +6,9 @@
  * (never weakened: a wrong head-unit clock is reported as `clock`), and one timeout per request. No
  * retry happens here: the caller decides when to try again.
  *
- * close() closes the client for good until reopen(): see there.
+ * close() closes the client for good until reopen(): see there. A single request can be ended alone through
+ * the cancel handle its caller asks for (RequestOptions.cancelHandle): the dialog long-poll uses it when the
+ * screen is hidden, without touching any other request, the agents or the client.
  */
 import * as nodeDns from 'dns';
 import * as nodeHttps from 'https';
@@ -72,6 +74,12 @@ export interface RequestOptions {
   timeoutMs?: number;
   /** The dialog long-poll: sent on its own single-socket agent, created on first use. */
   longPoll?: boolean;
+  /**
+   * Called once, synchronously, before request() returns, with a function that ends this request alone: it
+   * rejects as `offline` ('the request was cancelled'), aborts the socket request and clears its timer. Other
+   * requests, the agents and the client are not touched. Calling it after the request settled does nothing.
+   */
+  cancelHandle?: (cancel: () => void) => void;
 }
 
 /** One open period of the client, from construction or reopen() to close(). */
@@ -214,6 +222,18 @@ export class HttpsClient {
         if (error !== null) reject(error);
         else resolve(value as T);
       };
+      if (options !== undefined && typeof options.cancelHandle === 'function') {
+        const cancelThis = (): void => {
+          if (settled) return;
+          finish(new UplinkError('offline', 'the request was cancelled'));
+          abortRequest(req);
+        };
+        try {
+          options.cancelHandle(cancelThis);
+        } catch {
+          // the caller's handle failed: the request simply cannot be cancelled
+        }
+      }
 
       const generation = this.generation;
       if (generation.closed) return finish(new UplinkError('offline', 'the uplink is closed'));

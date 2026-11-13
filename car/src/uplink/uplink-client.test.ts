@@ -10,14 +10,14 @@ const MINUTE = 60_000;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- request bodies are inspected loosely in the assertions
 type Body = any;
-interface Call { method: string; path: string; body: Body; bearer: string; options?: { timeoutMs?: number; longPoll?: boolean } }
+interface Call { method: string; path: string; body: Body; bearer: string; options?: { timeoutMs?: number; longPoll?: boolean; cancelHandle?: (cancel: () => void) => void } }
 
 /** A stand-in for HttpsClient: records every request and answers with `reply`. */
 function fakeHttp(reply: (call: Call) => Promise<unknown> = () => Promise.resolve(undefined)) {
   const state = { online: true, closes: 0, reopens: 0, calls: [] as Call[], reply };
   const http = {
     online: () => state.online,
-    request(method: string, path: string, body: unknown, bearer: string, options?: { timeoutMs?: number; longPoll?: boolean }) {
+    request(method: string, path: string, body: unknown, bearer: string, options?: Call['options']) {
       const call = { method, path, body: body === null ? null : JSON.parse(JSON.stringify(body)), bearer, options };
       state.calls.push(call);
       if (!state.online) return Promise.reject(new UplinkError('offline', 'no lease'));
@@ -310,6 +310,178 @@ test('alerts are sent at once when online and kept (max 20) when offline', async
   uplink.onTick('asleep');
   await settle();
   expect(state.calls).toHaveLength(4);
+});
+
+function cleared(n: number): AlertEvent {
+  return { ...alert(n), active: false, clearedAt: n + 1 };
+}
+
+test('a queued clearing never causes a request of its own: driving it rides with the next snapshot batch, and a raise takes it at once', async () => {
+  const { uplink, state, clock } = setup();
+  uplink.recordSnapshot(snap(1));
+  uplink.onTick('driving');                                    // t0: the minute's batch
+  await settle();
+  expect(state.calls.map((c) => c.path)).toEqual(['/car/v1/snapshots']);
+
+  clock.t += 10_000;
+  uplink.queueAlerts([cleared(1)]);
+  expect(uplink.queued().alerts).toBe(1);
+  for (let s = 10; s < 60; s++) {
+    uplink.onTick('driving');
+    await settle();
+    clock.t += 1000;
+  }
+  expect(state.calls).toHaveLength(1);                         // nothing between two batches
+  uplink.recordSnapshot(snap(2));
+  uplink.onTick('driving');                                    // t0 + 60 s: the next batch, the clearing with it
+  await settle();
+  expect(state.calls.map((c) => c.path)).toEqual(['/car/v1/snapshots', '/car/v1/snapshots', '/car/v1/alerts']);
+  expect(state.calls[2].body.alerts).toEqual([cleared(1)]);
+  expect(uplink.queued().alerts).toBe(0);
+
+  // a raise is sent at once and carries what was queued before it, in order
+  clock.t += 5000;
+  uplink.queueAlerts([cleared(2)]);
+  uplink.sendAlerts([alert(3)]);
+  await settle();
+  expect(state.calls).toHaveLength(4);
+  expect(state.calls[3].body.alerts.map((a: AlertEvent) => [a.id, a.active])).toEqual([['a2', false], ['a3', true]]);
+
+  // a clearing queued right after that raise waits for the next batch, even though no alert send is due yet
+  clock.t += 5000;
+  uplink.queueAlerts([cleared(3)]);
+  for (let s = 0; s < 50; s++) {
+    clock.t += 1000;
+    uplink.onTick('driving');
+    await settle();
+  }
+  expect(state.calls).toHaveLength(4);
+  uplink.recordSnapshot(snap(3));
+  clock.t += 1000;
+  uplink.onTick('driving');
+  await settle();
+  expect(state.calls.slice(4).map((c) => c.path)).toEqual(['/car/v1/snapshots', '/car/v1/alerts']);
+  expect(state.calls[5].body.alerts.map((a: AlertEvent) => a.id)).toEqual(['a3']);
+
+  // awake (no batches): at most once per interval, as a failed send is retried
+  clock.t += 5000;
+  uplink.queueAlerts([cleared(4)]);
+  uplink.onTick('awake');
+  await settle();
+  expect(state.calls).toHaveLength(6);
+  clock.t += MINUTE;
+  uplink.onTick('awake');
+  await settle();
+  expect(state.calls).toHaveLength(7);
+  expect(state.calls[6].body.alerts.map((a: AlertEvent) => a.id)).toEqual(['a4']);
+});
+
+test('driving, a raise that could not go out at once is sent on the first online tick, not with the next batch', async () => {
+  const { uplink, state, clock } = setup();
+  uplink.recordSnapshot(snap(1));
+  uplink.onTick('driving');                                    // t0: the minute's batch
+  await settle();
+  expect(state.calls.map((c) => c.path)).toEqual(['/car/v1/snapshots']);
+
+  clock.t += 5000;
+  state.online = false;                                        // t0 + 5 s: the link drops
+  clock.t += 5000;
+  uplink.queueAlerts([cleared(1)]);
+  uplink.sendAlerts([alert(2)]);                               // t0 + 10 s: a raise, kept
+  await settle();
+  expect(state.calls).toHaveLength(1);
+  clock.t += 5000;
+  state.online = true;                                         // t0 + 15 s: back
+  uplink.onTick('driving');
+  await settle();
+  expect(state.calls.map((c) => c.path)).toEqual(['/car/v1/snapshots', '/car/v1/alerts']);
+  expect(state.calls[1].body.alerts.map((a: AlertEvent) => [a.id, a.active])).toEqual([['a1', false], ['a2', true]]);
+  expect(uplink.queued().alerts).toBe(0);
+
+  // a clearing queued after it waits for the batch again
+  clock.t += 5000;
+  uplink.queueAlerts([cleared(2)]);
+  uplink.onTick('driving');
+  await settle();
+  expect(state.calls).toHaveLength(2);
+
+  // a raise whose send failed is tried again one interval after that attempt, ahead of the next batch
+  clock.t += 5000;                                             // t0 + 25 s
+  state.reply = fail('server-error');
+  uplink.sendAlerts([alert(3)]);
+  await settle();
+  expect(state.calls).toHaveLength(3);
+  expect(uplink.queued().alerts).toBe(2);
+  state.reply = () => Promise.resolve(undefined);
+  for (let s = 0; s < 59; s++) {
+    clock.t += 1000;                                           // up to t0 + 84 s: no batch (no snapshot recorded)
+    uplink.onTick('driving');
+    await settle();
+  }
+  expect(state.calls).toHaveLength(3);
+  clock.t += 1000;                                             // t0 + 85 s: one interval after the failed attempt
+  uplink.onTick('driving');
+  await settle();
+  expect(state.calls).toHaveLength(4);
+  expect(state.calls[3].body.alerts.map((a: AlertEvent) => [a.id, a.active])).toEqual([['a2', false], ['a3', true]]);
+
+  // with the raise delivered, a clearing that waits goes with the next batch only
+  clock.t += 1000;
+  uplink.queueAlerts([cleared(3)]);
+  for (let s = 0; s < 5; s++) {
+    clock.t += 1000;
+    uplink.onTick('driving');
+    await settle();
+  }
+  expect(state.calls).toHaveLength(4);
+});
+
+test('queued clearings and raises share the bounded queue of 20; queueAlerts never sends and never throws', async () => {
+  const { uplink, state } = setup();
+  state.online = false;
+  for (let i = 0; i < 30; i++) uplink.queueAlerts([cleared(i)]);
+  for (let i = 30; i < 40; i++) uplink.sendAlerts([alert(i)]);
+  expect(uplink.queued().alerts).toBe(ALERT_QUEUE_MAX);
+  expect(state.calls).toHaveLength(0);
+  state.online = true;
+  uplink.queueAlerts([cleared(40)]);
+  await settle();
+  expect(state.calls).toHaveLength(0);
+  expect(() => uplink.queueAlerts(null as unknown as AlertEvent[])).not.toThrow();
+  uplink.close();
+  uplink.queueAlerts([cleared(41)]);
+  expect(state.calls).toHaveLength(0);
+});
+
+test('a dialog poll cancelled by its caller rejects as offline without counting as a link failure', async () => {
+  const { uplink, state } = setup({
+    reply: (call) =>
+      call.path.indexOf('/car/v1/dialog') === 0
+        ? new Promise((_resolve, reject) => {
+            if (call.options && call.options.cancelHandle) call.options.cancelHandle(() => reject(new UplinkError('offline', 'the request was cancelled')));
+          })
+        : Promise.resolve({ ownerLimits: {}, popupsEnabled: true }),
+  });
+  await uplink.fetchConfig();
+  expect(uplink.status()).toBe('ok');
+  let cancel: (() => void) | null = null;
+  const poll = uplink.pollDialog('t-1', (fn) => (cancel = fn));
+  expect(cancel).not.toBeNull();
+  expect(state.calls[1].options!.longPoll).toBe(true);
+  cancel!();
+  await expect(poll).rejects.toMatchObject({ kind: 'offline' });
+  expect(uplink.status()).toBe('ok');
+  expect(() => cancel!()).not.toThrow();
+
+  // a poll that is not cancelled and fails still counts
+  state.reply = fail('server-error');
+  await expect(uplink.pollDialog(null, () => undefined)).rejects.toMatchObject({ kind: 'server-error' });
+  expect(uplink.status()).toBe('error');
+  // refused before any request (closed): the handle still works and does nothing
+  uplink.close();
+  let late: (() => void) | null = null;
+  await expect(uplink.pollDialog(null, (fn) => (late = fn))).rejects.toMatchObject({ kind: 'offline' });
+  expect(() => late && late()).not.toThrow();
 });
 
 test('with no paired device nothing is sent and status is unpaired', async () => {
