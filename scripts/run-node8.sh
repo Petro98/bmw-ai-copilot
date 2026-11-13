@@ -10,7 +10,9 @@
 #   3. `npx --yes -p node@8.16.2 node`, only on x86_64 (Node 8 has no arm64 build);
 #   4. with NODE8_STATIC_FALLBACK=1: a static ES2017 syntax check only
 #      (scripts/node8-static-check.mjs, ESLint's parser, no rules). It prints a warning and exits 0
-#      only if the file parses. In this mode --check and a run behave the same.
+#      only if everything parses. A run parses the file and every .js file it reaches through relative
+#      string-literal requires, recursively, inside the repository; --check parses the file alone, like
+#      `node --check`. Nothing is executed, so this is not a runtime test.
 #   5. otherwise: says what is missing and how to fix it, and exits with status 3.
 set -euo pipefail
 
@@ -79,6 +81,9 @@ fi
 # 4. Opt-in static syntax check.
 if [ "${NODE8_STATIC_FALLBACK:-}" = "1" ]; then
   echo "WARNING: Node 8.16.2 runtime not available - static ES2017 syntax check only" >&2
+  if [ -n "$check_flag" ]; then
+    exec node "$script_dir/node8-static-check.mjs" --no-follow "$file_abs"
+  fi
   exec node "$script_dir/node8-static-check.mjs" "$file_abs"
 fi
 
