@@ -1,0 +1,82 @@
+/* «Підʼєднати авто»: the device id and one label field on `surface`, in the settings page's form style (tokens.css). */
+
+:host {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: var(--space-1) var(--space-3) var(--space-3);
+}
+
+.block,
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.form {
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.heading {
+  margin: 0;
+  color: var(--ink-dim);
+}
+
+p {
+  margin: 0;
+}
+
+.explain,
+.field-label {
+  color: var(--ink-dim);
+}
+
+.explain,
+.message,
+.device-id {
+  font-size: 17px;
+  line-height: 26px;
+}
+
+.field-label {
+  font-size: 13px;
+  line-height: 16px;
+}
+
+.device-id {
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+input {
+  min-height: 48px;
+  min-width: 0;
+  padding: 0 12px;
+  border: 2px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  color: var(--ink);
+  font-size: 17px;
+  line-height: 26px;
+}
+
+.primary {
+  min-height: 48px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--signal);
+  color: var(--on-signal);
+  font-size: 17px;
+  line-height: 26px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}

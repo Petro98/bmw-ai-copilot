@@ -1,0 +1,16 @@
+{
+  "name": "@copilot/shared",
+  "version": "0.1.0",
+  "private": true,
+  "description": "API contracts shared by the backend, the phone panel and the car app.",
+  "license": "MIT",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "dependencies": {
+    "@copilot/event-engine": "0.1.0",
+    "@copilot/vehicle-core": "0.1.0"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  }
+}

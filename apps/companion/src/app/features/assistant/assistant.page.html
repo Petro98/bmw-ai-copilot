@@ -1,0 +1,94 @@
+@if (exchange(); as ex) {
+  <!-- While moving the card may be short (assistant.page.css), so once there is an answer or an error it opens on that
+       result: plan 3 shows the button, the state and the short answer while moving, not the question. -->
+  @let resultOnly = moving() && !!(ex.error || ex.answer);
+  <section class="card" [attr.aria-busy]="ask.pending()">
+    @if (!resultOnly) {
+      <span class="phone-label who">ВИ</span>
+      <p class="question" data-question>{{ ex.question }}</p>
+    }
+    @if (ex.error) {
+      <span class="phone-label who" [class.divider]="!resultOnly">COPILOT</span>
+      <p class="error" role="alert" data-error>{{ ex.error }}</p>
+    } @else if (ex.answer !== null) {
+      <span class="phone-label who" [class.divider]="!resultOnly">COPILOT</span>
+      <p class="answer-text" data-answer [class.answer-driving]="moving()" [class.phone-body]="!moving()">{{ ex.answer }}</p>
+    }
+  </section>
+}
+
+<section class="talk" aria-label="Голос">
+  <button type="button" class="talk-button" data-talk
+    [attr.aria-label]="talkLabel()" [disabled]="talkDisabled()" (click)="onTalk()">
+    @if (talkIdle()) {
+      <svg aria-hidden="true" width="76" height="76" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+        stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0"></path><path d="M12 18v3"></path></svg>
+    } @else {
+      <svg aria-hidden="true" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+        stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>
+    }
+  </button>
+  @if (meter()) {
+    <svg class="meter" data-meter aria-hidden="true" width="92" height="32" viewBox="0 0 92 32">
+      <rect x="0" y="12" width="4" height="8" rx="2"></rect>
+      <rect x="8" y="8" width="4" height="16" rx="2"></rect>
+      <rect x="16" y="4" width="4" height="24" rx="2"></rect>
+      <rect x="24" y="10" width="4" height="12" rx="2"></rect>
+      <rect x="32" y="2" width="4" height="28" rx="2"></rect>
+      <rect x="40" y="6" width="4" height="20" rx="2"></rect>
+      <rect x="48" y="12" width="4" height="8" rx="2"></rect>
+      <rect x="56" y="8" width="4" height="16" rx="2"></rect>
+      <rect x="64" y="4" width="4" height="24" rx="2"></rect>
+      <rect x="72" y="10" width="4" height="12" rx="2"></rect>
+      <rect x="80" y="6" width="4" height="20" rx="2"></rect>
+      <rect x="88" y="12" width="4" height="8" rx="2"></rect>
+    </svg>
+  }
+  <p class="talk-state" data-talk-state aria-live="polite">{{ talkStateText() }}</p>
+  <span class="phone-label talk-lang">УКРАЇНСЬКА</span>
+  @if (talkMessage(); as note) {
+    <p class="talk-message" role="status" data-talk-message>{{ note }}</p>
+  }
+  @if (voiceNote(); as note) {
+    <p class="talk-message" role="status" data-voice-note>{{ note }}</p>
+  }
+</section>
+
+@if (ask.pending()) {
+  <button type="button" class="secondary" (click)="ask.cancel()">Скасувати</button>
+}
+
+@if (!moving() && earlier().length > 0) {
+  <details class="earlier">
+    <summary>Раніше</summary>
+    <ol class="turns">
+      @for (turn of earlier(); track turn.id) {
+        <li class="turn">
+          <span class="phone-label meta">{{ time(turn.at) }}</span>
+          <p class="question">{{ turn.question }}</p>
+          <p class="phone-body">{{ turn.answer }}</p>
+        </li>
+      }
+    </ol>
+  </details>
+}
+
+<div class="chips">
+  @for (topic of topics(); track topic) {
+    <button type="button" class="chip" data-chip [disabled]="busy()" (click)="send(topic)">{{ topic }}</button>
+  }
+</div>
+
+@if (!moving()) {
+  <form class="ask" (submit)="submit($event)">
+    <label class="phone-label field-label" for="question">ВАШЕ ПИТАННЯ</label>
+    <div class="field-row">
+      <input id="question" type="text" autocomplete="off" enterkeyhint="send"
+        [attr.maxlength]="maxChars" [value]="draft()" [disabled]="busy()" (input)="onInput($event)">
+      <button type="submit" class="send" [disabled]="!canSend()">Запитати</button>
+    </div>
+    @if (draft().length >= counterFrom) {
+      <span class="phone-label counter" data-counter>{{ draft().length }} / {{ maxChars }}</span>
+    }
+  </form>
+}

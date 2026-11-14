@@ -1,0 +1,269 @@
+/* After docs/design/mockups/PhoneTalk.dc.html. */
+
+:host {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3) var(--space-3);
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 20px;
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+/*
+ * While moving (plan 3, Global Constraints: the screen shows the button, the state and the short answer): the page is
+ * exactly as tall as the content area. The card keeps its place above the button (PhoneTalk.dc.html) but takes only
+ * the room left over and scrolls inside itself, so a long answer in the large `answer-driving` style never pushes the
+ * button or the state line below the screen. It never shrinks below its label and the first result line: 20 + 16 + 6
+ * + 52 + 20 px (padding, label, gap, the two-line 17/26 error, which is taller than one 46 px `answer-driving` line),
+ * and once a result exists the question gives way (assistant.page.html), so the card opens on the answer or the
+ * error. On a small phone it is the chips, last on the page, that go below the screen, never the result.
+ */
+:host(.driving) {
+  height: 100%;
+}
+
+:host(.driving) > * {
+  flex-shrink: 0;
+}
+
+:host(.driving) > .card {
+  flex-shrink: 1;
+  min-height: 114px;
+  overflow-y: auto;
+}
+
+.who,
+.meta,
+.counter,
+.field-label {
+  color: var(--ink-dim);
+}
+
+.divider {
+  margin-top: 12px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.question {
+  font-size: 17px;
+  line-height: 26px;
+  color: var(--ink-dim);
+}
+
+.answer-text {
+  white-space: pre-line;
+}
+
+.error {
+  font-size: 17px;
+  line-height: 26px;
+  color: var(--ink);
+}
+
+button {
+  min-height: 48px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.secondary {
+  align-self: flex-start;
+  padding: 0 18px;
+  border: 2px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 17px;
+  line-height: 26px;
+  font-weight: 500;
+}
+
+.earlier {
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.earlier summary {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  padding: 0 var(--space-3);
+  font-size: 17px;
+  line-height: 26px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.turns {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0 var(--space-3) var(--space-3);
+  list-style: none;
+}
+
+.turn {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.chip {
+  padding: 0 var(--space-3);
+  /* A control's edge: `line-strong` (docs/design/tokens.json: `line` is never the sole sign of a control). */
+  border: 1px solid var(--line-strong);
+  background: var(--surface-raised);
+  color: var(--ink);
+  font-size: 17px;
+  line-height: 26px;
+  text-align: left;
+}
+
+.ask {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.field-row {
+  display: flex;
+  gap: var(--space-2);
+}
+
+input {
+  flex-grow: 1;
+  min-width: 0;
+  min-height: 48px;
+  padding: 0 var(--space-3);
+  border: 2px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 17px;
+  line-height: 26px;
+}
+
+input:disabled {
+  opacity: 0.5;
+}
+
+.send {
+  flex-shrink: 0;
+  padding: 0 18px;
+  border: 0;
+  background: var(--signal);
+  color: var(--on-signal);
+  font-size: 17px;
+  line-height: 26px;
+  font-weight: 500;
+}
+
+.counter {
+  align-self: flex-end;
+}
+
+/*
+ * Push-to-talk (PhoneTalk.dc.html): 176 px round `signal` button. Its state is said in words (aria-label, state
+ * line) and by the icon (microphone / stop square), never by colour alone.
+ */
+
+.talk {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+}
+
+.talk-button {
+  width: 176px;
+  height: 176px;
+  min-height: 176px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--signal);
+  color: var(--on-signal);
+}
+
+.talk-state {
+  font-size: 17px;
+  line-height: 26px;
+  text-align: center;
+}
+
+.talk-lang {
+  color: var(--ink-dim);
+}
+
+.talk-message {
+  max-width: 32ch;
+  font-size: 17px;
+  line-height: 26px;
+  color: var(--ink);
+  text-align: center;
+}
+
+/* The level meter: the only moving element on the phone, shown while listening or speaking. */
+.meter {
+  flex-shrink: 0;
+  fill: var(--signal);
+}
+
+.meter rect {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: level 0.9s ease-in-out infinite alternate;
+}
+
+.meter rect:nth-child(3n + 2) {
+  animation-delay: -0.3s;
+}
+
+.meter rect:nth-child(3n) {
+  animation-delay: -0.6s;
+}
+
+@keyframes level {
+  from {
+    transform: scaleY(0.35);
+  }
+
+  to {
+    transform: scaleY(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .meter rect {
+    animation: none;
+  }
+}

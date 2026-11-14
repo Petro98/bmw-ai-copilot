@@ -1,0 +1,36 @@
+{
+  "id": "p98_copilot",
+  "title": "Copilot",
+  "version": "0.1.0",
+  "license": "MIT",
+  "loggingId": "OAPC",
+  "startType": "autostart",
+  "mguInternet": true,
+  "mguHmi": ["ID7"],
+  "memoryKB": 131072,
+  "cpuLimit": 30,
+  "signals": {
+    "de.bmw.infotainment.vehicle.CDS": { "statusEngineSpeed2": "rs", "statusEngineTemperature": "rs", "statusBattery2": "rs" },
+    "de.bmw.infotainment.vehicle.Vehicle2": { "statusCarSpeed2": "rs" },
+    "de.bmw.infotainment.KombiIF": { "_optional": "fuel level, range and odometer", "statusRangeTankStatus": "rs" },
+    "de.bmw.infotainment.vehicle.TPMS": { "_optional": "tyre pressures and their targets", "statusTyrePressure": "rs", "statusTargetTyrePressure": "rs" },
+    "de.bmw.infrastructure.VehicleCondition": { "VehicleCondition": "s" },
+    "de.bmw.infrastructure.VehicleInformation": { "_optional": "the gear and the selector position", "statusGearboxDrive": "s", "DataPowerTrain2": "s" },
+    "de.bmw.infotainment.drivingexcitement.FES": { "_optional": "the driving mode", "statusFESVehicleDynamicSwitchHMI": "rs" },
+    "de.bmw.infotainment.vehicle.Vehicle": { "_optional": "the car's tyre-pressure unit; tyre pressures are then shown without a unit", "statusNewCurrentUnitsStatusExt": "rs" },
+    "de.bmw.infotainment.checkcontrol.CheckControlMaster": { "_optional": "Check Control messages", "basicList": "rs" },
+    "de.bmw.infotainment.KombiInterface_2": { "_optional": "Check Control texts and the service list", "ccList": "rs", "newCCMessage": "rs", "cbsDataServiceList": "rs" }
+  },
+  "screens": [
+    { "name": "MAIN", "kind": "canvas", "title": "Copilot", "buttons": [["BTN_SETTINGS", "Налаштування"]] }
+  ],
+  "settings": [
+    { "key": "popups", "type": "bool", "label": "Спливаючі сповіщення", "default": true },
+    { "key": "latinPopups", "type": "bool", "label": "Сповіщення латиницею", "default": false },
+    { "key": "testPopup", "type": "bool", "label": "Тестове сповіщення", "default": false }
+  ],
+  "popups": [
+    { "name": "ALERT_POP", "type": "popUp", "widget": "LT_State_PopupSmall", "label": "text3", "button": "OK" }
+  ],
+  "config": { "backendUrl": null }
+}

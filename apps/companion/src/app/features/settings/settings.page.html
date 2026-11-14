@@ -1,0 +1,112 @@
+<section class="block" aria-labelledby="settings-limits">
+  <h2 class="phone-label heading" id="settings-limits">МОЇ ЛІМІТИ</h2>
+  <p class="explain">Це ваші власні межі, а не значення BMW. Поки ліміт не задано, попереджень за ним немає.</p>
+  @if (loadError(); as error) {
+    <p class="message" role="alert">{{ error }}</p>
+  }
+  @if (settings()) {
+    <ul class="list">
+      @for (limit of limits; track limit.key) {
+        <li class="item">
+          <button type="button" class="row" [attr.data-limit]="limit.key" [attr.aria-expanded]="editing() === limit.key"
+            (click)="edit(limit.key)">{{ limit.label }} <span class="value">{{ limitText(limit) }}</span></button>
+          @if (editing() === limit.key) {
+            <form class="editor" (submit)="saveLimit($event, limit.key)">
+              <label class="field-label" [attr.for]="'limit-' + limit.key">{{ limit.label }}, {{ limit.unit }}</label>
+              <input type="number" step="any" inputmode="decimal" autocomplete="off" [id]="'limit-' + limit.key"
+                [value]="seed()" (input)="onDraft($event)">
+              <div class="actions">
+                <button type="submit" class="primary" [disabled]="draftValue() === null || saving()">Зберегти</button>
+                <button type="button" class="secondary" [disabled]="saving()" (click)="clearLimit(limit.key)">Прибрати ліміт</button>
+              </div>
+              @if (limitError(); as error) {
+                <p class="message" role="alert" data-limit-error>{{ error }}</p>
+              }
+            </form>
+          }
+        </li>
+      }
+    </ul>
+  }
+</section>
+
+<section class="block" aria-labelledby="settings-car">
+  <h2 class="phone-label heading" id="settings-car">ПОПЕРЕДЖЕННЯ В АВТО</h2>
+  <div class="list">
+    <label class="row switch" for="popups">Вікна на екрані авто<input id="popups" type="checkbox"
+      [checked]="settings()?.popupsEnabled === true" [disabled]="!settings() || saving()" (change)="setPopups($event)"></label>
+    <label class="row switch" for="diagnostics"><span class="stack">Читання памʼяті помилок<span class="hint">Вимкнено, доки ви не погодите перевірку в авто</span></span><input
+      id="diagnostics" type="checkbox" disabled [checked]="settings()?.diagnosticsEnabled === true"></label>
+  </div>
+  @if (switchError(); as error) {
+    <p class="message" role="alert">{{ error }}</p>
+  }
+</section>
+
+<section class="block" aria-labelledby="settings-devices">
+  <h2 class="phone-label heading" id="settings-devices">ПІДʼЄДНАНІ ПРИСТРОЇ</h2>
+  @if (devices(); as list) {
+    @if (list.length === 0) {
+      <p class="explain">Немає підʼєднаних пристроїв. Відскануйте QR-код на екрані авто, щоб підʼєднати його.</p>
+    } @else {
+      <ul class="list">
+        @for (device of list; track device.deviceId) {
+          <li class="row" [attr.data-device]="device.deviceId">
+            <span class="stack">{{ device.label }}<span class="hint">Підʼєднано {{ formatDateTime(device.createdAt) }} · {{
+              device.lastSeenAt === null ? 'ще не виходив на звʼязок' : 'на звʼязку ' + formatDateTime(device.lastSeenAt) }}</span></span>
+            @if (confirming() === device.deviceId) {
+              <span class="confirm">
+                <button type="button" class="secondary" [disabled]="removing() !== null" (click)="unpair(device)">Підтвердити відʼєднання</button>
+                <button type="button" class="secondary" (click)="cancelUnpair()">Скасувати</button>
+              </span>
+            } @else {
+              <button type="button" class="secondary" [disabled]="removing() !== null" (click)="askUnpair(device)">Відʼєднати</button>
+            }
+          </li>
+        }
+      </ul>
+    }
+  }
+  @if (devicesError(); as error) {
+    <p class="message" role="alert" data-devices-error>{{ error }}</p>
+  }
+</section>
+
+@if (status(); as s) {
+  <section class="block" aria-labelledby="settings-claude">
+    <h2 class="phone-label heading" id="settings-claude">CLAUDE</h2>
+    <div class="list">
+      <div class="row" data-line="model">Модель <span class="value">{{ s.claude.model }}</span></div>
+      <div class="row" data-line="voice-model">Модель для голосу <span class="value">{{ s.claude.voiceModel === s.claude.model ? 'Та сама' : s.claude.voiceModel }}</span></div>
+      <div class="row" data-line="spend-day">Сьогодні <span class="value">{{ money(s.budget.dayUsd) }} з {{ money(s.budget.dayLimitUsd) }}</span></div>
+      <div class="row" data-line="spend-month">Цього місяця <span class="value">{{ money(s.budget.monthUsd) }} з {{ money(s.budget.monthLimitUsd) }}</span></div>
+    </div>
+  </section>
+}
+
+@if (isMock()) {
+  <section class="block">
+    <div class="list">
+      <div class="row">
+        <label for="scenario">Демо-сценарій</label>
+        <select id="scenario" (change)="chooseScenario($event)">
+          @for (scenario of scenarios(); track scenario.id) {
+            <option [value]="scenario.id" [selected]="scenario.id === selectedScenario()">{{ scenario.title }}</option>
+          }
+        </select>
+      </div>
+    </div>
+    @if (scenarioError(); as error) {
+      <p class="message" role="alert">{{ error }}</p>
+    }
+  </section>
+}
+
+<div class="block">
+  <div class="list">
+    <button type="button" class="row" data-sign-out [disabled]="signingOut()" (click)="signOut()">Вийти</button>
+  </div>
+  @if (signOutError(); as error) {
+    <p class="message" role="alert" data-sign-out-error>{{ error }}</p>
+  }
+</div>

@@ -1,0 +1,13 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    // The bundle runs on the head unit's Node 8.16.2: ES2017 syntax and library only.
+    "target": "es2017",
+    "lib": ["es2017"],
+    // Node's types for the composition root (main.ts) and the tests; the modules themselves get their
+    // platform APIs injected (platform.ts). Node 8 lacks much of what @types/node declares (fetch, URL,
+    // fs.rmSync, recursive mkdir): the Node 8 check and the review catch those, not the type checker.
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

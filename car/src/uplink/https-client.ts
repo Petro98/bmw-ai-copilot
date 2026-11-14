@@ -1,0 +1,393 @@
+/**
+ * HTTPS to the backend on the head unit's Node 8.16.2: `https.request` (no fetch, no global URL), one
+ * keep-alive agent with a single socket, plus a second single-socket agent used only by the dialog
+ * long-poll (so a poll held for 25 s does not hold up snapshots, alerts and questions: at most two
+ * connections), names resolved through the uplink lease's DNS servers, normal certificate verification
+ * (never weakened: a wrong head-unit clock is reported as `clock`), and one timeout per request. No
+ * retry happens here: the caller decides when to try again.
+ *
+ * close() closes the client for good until reopen(): see there. A single request can be ended alone through
+ * the cancel handle its caller asks for (RequestOptions.cancelHandle): the dialog long-poll uses it when the
+ * screen is hidden, without touching any other request, the agents or the client.
+ */
+import * as nodeDns from 'dns';
+import * as nodeHttps from 'https';
+import type { Clock } from '@copilot/vehicle-core';
+import type { Log } from '../safe';
+import type { Lease } from './lease';
+import { createLeaseLookup, isDnsFailure, type DnsModuleLike, type LeaseLookup, type LookupCallback, type LookupFn, type TimeoutApi } from './resolver';
+
+export type UplinkErrorKind = 'offline' | 'dns' | 'timeout' | 'clock' | 'tls' | 'unauthorized' | 'client-error' | 'server-error';
+
+export class UplinkError extends Error {
+  constructor(readonly kind: UplinkErrorKind, message: string) {
+    super(message);
+    this.name = 'UplinkError';
+  }
+}
+
+export const HTTPS_TIMEOUT_MS = 15_000;
+/** A reply larger than this is refused (the largest legitimate one is a page of dialog turns). */
+export const MAX_RESPONSE_BYTES = 1_048_576;
+
+interface ClientRequestLike {
+  on(event: string, listener: (...args: never[]) => void): unknown;
+  end(chunk?: string): unknown;
+  abort?(): void;
+  destroy?(error?: Error): unknown;
+}
+interface IncomingMessageLike {
+  statusCode?: number;
+  on(event: string, listener: (...args: never[]) => void): unknown;
+  resume?(): unknown;
+}
+interface AgentLike { destroy(): void }
+
+/** The part of Node's `https` module (or, in the test-only plain mode, `http`) used here. */
+export interface HttpsModuleLike {
+  request(options: Record<string, unknown>, onResponse: (res: IncomingMessageLike) => void): ClientRequestLike;
+  Agent: new (options: Record<string, unknown>) => AgentLike;
+}
+
+export interface HttpsClientOptions {
+  baseUrl: string;
+  lease: () => Lease;
+  timeoutMs?: number;            // default 15000
+  extraCaPem?: string[];
+  log: Log;
+  /** Injected for tests; default: Node's `https` module. */
+  https?: HttpsModuleLike;
+  /** Injected for tests; default: Node's `dns` module. */
+  dns?: DnsModuleLike;
+  /** Injected for tests; default: the global timers. */
+  timers?: TimeoutApi;
+  /** For the DNS cache's age; default: Date.now. */
+  clock?: Clock;
+  /**
+   * Test-only: allow an `http://` base address, with Node's `http` module passed as `https`. Used by the
+   * Node 8 smoke test against a local server; never set by the app.
+   */
+  plainHttpForTests?: boolean;
+}
+
+export interface RequestOptions {
+  timeoutMs?: number;
+  /** The dialog long-poll: sent on its own single-socket agent, created on first use. */
+  longPoll?: boolean;
+  /**
+   * Called once, synchronously, before request() returns, with a function that ends this request alone: it
+   * rejects as `offline` ('the request was cancelled'), aborts the socket request and clears its timer. Other
+   * requests, the agents and the client are not touched. Calling it after the request settled does nothing.
+   */
+  cancelHandle?: (cancel: () => void) => void;
+}
+
+/** One open period of the client, from construction or reopen() to close(). */
+interface Generation { closed: boolean; lookup: LookupFn }
+
+interface Target { hostname: string; port: number; basePath: string }
+
+const URL_PATTERN = /^(https?):\/\/([A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(?::(\d{1,5}))?(\/[^?#\s]*)?$/;
+
+function parseBaseUrl(baseUrl: string, plain: boolean): Target | string {
+  const match = URL_PATTERN.exec(String(baseUrl).trim());
+  if (match === null) return 'the backend address is not a valid URL';
+  const scheme = match[1];
+  if (plain ? scheme !== 'http' : scheme !== 'https') return plain ? 'the plain test mode needs an http:// address' : 'the backend address must be https://';
+  const port = match[3] === undefined ? (scheme === 'https' ? 443 : 80) : Number(match[3]);
+  if (!(port >= 1 && port <= 65535)) return 'the backend port is out of range';
+  const host = match[2];
+  return {
+    hostname: host.charAt(0) === '[' ? host.slice(1, -1) : host,
+    port,
+    basePath: (match[4] || '').replace(/\/+$/, ''),
+  };
+}
+
+const OFFLINE_CODES = ['EHOSTUNREACH', 'ENETUNREACH'];
+// OpenSSL's verify results as Node reports them in `error.code`.
+const CLOCK_CODES = ['CERT_NOT_YET_VALID', 'CERT_HAS_EXPIRED'];
+const TLS_CODE = /^(ERR_TLS_|ERR_SSL_|ERR_OSSL_)|CERT|SIGNATURE|^UNABLE_TO_|^EPROTO$|^HOSTNAME_MISMATCH$/;
+
+/** Maps a socket, TLS or resolver error to its kind. */
+export function classifyError(error: unknown): UplinkErrorKind {
+  if (error instanceof UplinkError) return error.kind;
+  if (isDnsFailure(error)) return 'dns';
+  const e = (error !== null && typeof error === 'object' ? error : {}) as { code?: unknown; message?: unknown; cert?: unknown; reason?: unknown };
+  const code = typeof e.code === 'string' ? e.code : '';
+  if (OFFLINE_CODES.indexOf(code) >= 0) return 'offline';
+  if (CLOCK_CODES.indexOf(code) >= 0) return 'clock';
+  if (code !== '' && TLS_CODE.test(code)) return 'tls';
+  // Node 8 reports a host name that does not match the certificate without a code (tls.checkServerIdentity)
+  const message = typeof e.message === 'string' ? e.message : '';
+  if (code === '' && (e.cert !== undefined || /certificate|altnames|ssl|tls/i.test(message))) return 'tls';
+  return 'server-error'; // refused, reset, hang-up: the backend side is not answering properly
+}
+
+function statusKind(status: number): UplinkErrorKind {
+  if (status === 401 || status === 403) return 'unauthorized';
+  if (status >= 500) return 'server-error';
+  return 'client-error'; // other 4xx, and anything that is neither 2xx nor 5xx
+}
+
+function toUplinkError(error: unknown): UplinkError {
+  if (error instanceof UplinkError) return error;
+  const kind = classifyError(error);
+  const code = error !== null && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string' ? (error as { code: string }).code : '';
+  return new UplinkError(kind, 'request failed (' + (code || kind) + ')');
+}
+
+function abortRequest(req: ClientRequestLike | null): void {
+  if (req === null) return;
+  try {
+    if (typeof req.abort === 'function') req.abort();
+    else if (typeof req.destroy === 'function') req.destroy();
+  } catch {
+    // already gone
+  }
+}
+
+const globalTimers: TimeoutApi = {
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+};
+
+export class HttpsClient {
+  private readonly https: HttpsModuleLike;
+  private readonly timers: TimeoutApi;
+  private readonly lease: () => Lease;
+  private readonly timeoutMs: number;
+  private readonly ca: string[] | null;
+  private readonly target: Target | null;
+  private readonly targetProblem: string;
+  private readonly resolve: LeaseLookup;
+  private generation: Generation;
+  private agent: AgentLike | null = null;
+  /** The dialog long-poll's own agent; created by the first long-poll, destroyed by close(). */
+  private pollAgent: AgentLike | null = null;
+  /**
+   * Requests not yet settled, so `close()` can end them. Without this, a request waiting in the agent's
+   * queue (one socket) would be given a new socket on the orphaned agent once the old one is destroyed,
+   * and be sent after `close()`. Bounded by the callers: every entry has its own timeout and leaves the
+   * list when it settles.
+   */
+  private readonly inFlight: Array<() => void> = [];
+
+  constructor(o: HttpsClientOptions) {
+    this.https = o.https || (nodeHttps as unknown as HttpsModuleLike);
+    this.timers = o.timers || globalTimers;
+    this.lease = o.lease;
+    this.timeoutMs = typeof o.timeoutMs === 'number' && o.timeoutMs > 0 ? o.timeoutMs : HTTPS_TIMEOUT_MS;
+    this.ca = Array.isArray(o.extraCaPem) && o.extraCaPem.length > 0 ? o.extraCaPem.slice() : null;
+    const parsed = parseBaseUrl(o.baseUrl, o.plainHttpForTests === true);
+    this.target = typeof parsed === 'string' ? null : parsed;
+    this.targetProblem = typeof parsed === 'string' ? parsed : '';
+    if (this.target === null) {
+      try {
+        o.log.warn('uplink: ' + this.targetProblem);
+      } catch {
+        // logging is best effort
+      }
+    }
+    this.resolve = createLeaseLookup({
+      dns: o.dns || (nodeDns as unknown as DnsModuleLike),
+      lease: () => this.currentLease(),
+      clock: o.clock || { now: () => Date.now() },
+      timers: this.timers,
+    });
+    this.generation = this.newGeneration();
+  }
+
+  /** Whether the uplink has a lease right now. Never throws. */
+  online(): boolean {
+    return this.currentLease().online;
+  }
+
+  request<T>(method: 'GET' | 'POST', path: string, body: unknown, bearer: string, options?: RequestOptions): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      let timer: unknown = null;
+      let req: ClientRequestLike | null = null;
+      const cancel = (): void => {
+        finish(new UplinkError('offline', 'the uplink was closed'));
+        abortRequest(req);
+      };
+      const finish = (error: UplinkError | null, value?: unknown): void => {
+        if (settled) return;
+        settled = true;
+        if (timer !== null) this.timers.clearTimeout(timer);
+        timer = null;
+        const index = this.inFlight.indexOf(cancel);
+        if (index >= 0) this.inFlight.splice(index, 1);
+        if (error !== null) reject(error);
+        else resolve(value as T);
+      };
+      if (options !== undefined && typeof options.cancelHandle === 'function') {
+        const cancelThis = (): void => {
+          if (settled) return;
+          finish(new UplinkError('offline', 'the request was cancelled'));
+          abortRequest(req);
+        };
+        try {
+          options.cancelHandle(cancelThis);
+        } catch {
+          // the caller's handle failed: the request simply cannot be cancelled
+        }
+      }
+
+      const generation = this.generation;
+      if (generation.closed) return finish(new UplinkError('offline', 'the uplink is closed'));
+      const target = this.target;
+      if (target === null) return finish(new UplinkError('client-error', this.targetProblem));
+      if (!this.online()) return finish(new UplinkError('offline', 'no uplink lease'));
+
+      let payload: string | null = null;
+      if (body !== null && body !== undefined) {
+        try {
+          payload = JSON.stringify(body); // no indentation
+        } catch {
+          return finish(new UplinkError('client-error', 'the request body is not JSON'));
+        }
+      }
+      const headers: Record<string, string | number> = { Accept: 'application/json', Authorization: 'Bearer ' + bearer };
+      if (payload !== null) {
+        headers['Content-Type'] = 'application/json';
+        headers['Content-Length'] = Buffer.byteLength(payload, 'utf8');
+      }
+      const requestOptions: Record<string, unknown> = {
+        method,
+        hostname: target.hostname,
+        port: target.port,
+        path: target.basePath + path,
+        headers,
+        agent: this.currentAgent(options !== undefined && options.longPoll === true),
+        lookup: generation.lookup,
+      };
+      // On Node 8 `ca` replaces the bundled roots (tls.rootCertificates only exists from Node 12), so a
+      // backend reached with extra CAs must chain to one of them. Verification itself stays on.
+      if (this.ca !== null) requestOptions.ca = this.ca;
+
+      this.inFlight.push(cancel);
+      try {
+        req = this.https.request(requestOptions, (res) => this.readResponse(res, () => req, finish));
+        req.on('error', (error: unknown) => finish(toUplinkError(error)));
+      } catch (error) {
+        abortRequest(req);
+        return finish(toUplinkError(error));
+      }
+
+      const timeoutMs = options && typeof options.timeoutMs === 'number' && options.timeoutMs > 0 ? options.timeoutMs : this.timeoutMs;
+      timer = this.timers.setTimeout(() => {
+        timer = null;
+        finish(new UplinkError('timeout', 'no reply within ' + timeoutMs + ' ms'));
+        abortRequest(req);
+      }, timeoutMs);
+
+      try {
+        if (payload !== null) req.end(payload);
+        else req.end();
+      } catch (error) {
+        finish(toUplinkError(error));
+        abortRequest(req);
+      }
+    });
+  }
+
+  /**
+   * Closes the client for good, until reopen(). Every request still in flight is ended (rejected as
+   * `offline`, aborted, its timer cleared), lookups still waiting for a DNS answer are ended and their
+   * timers cleared, and both agents are destroyed. Node's Agent opens a new socket for the head of its
+   * queue when a socket closes, even for an aborted request, and that socket calls our `lookup`: the
+   * lookup handed out before close() therefore answers with an error at once from now on, without a
+   * DNS query and without a timer. Requests made while closed are refused as `offline` without any I/O.
+   */
+  close(): void {
+    this.generation.closed = true;
+    const pending = this.inFlight.splice(0, this.inFlight.length);
+    for (const cancel of pending) cancel();
+    this.resolve.cancelPending();
+    const agents = [this.agent, this.pollAgent];
+    this.agent = null;
+    this.pollAgent = null;
+    for (const agent of agents) {
+      if (agent === null) continue;
+      try {
+        agent.destroy();
+      } catch {
+        // nothing more to close
+      }
+    }
+  }
+
+  /** Opens a closed client again; the next request opens a new connection. Does nothing when open. */
+  reopen(): void {
+    if (this.generation.closed) this.generation = this.newGeneration();
+  }
+
+  private currentLease(): Lease {
+    try {
+      const lease = this.lease();
+      if (lease && lease.online === true) return { online: true, dns: Array.isArray(lease.dns) ? lease.dns : [] };
+    } catch {
+      // unreadable lease: offline
+    }
+    return { online: false, dns: [] };
+  }
+
+  private currentAgent(longPoll: boolean): AgentLike {
+    if (longPoll) {
+      if (this.pollAgent === null) this.pollAgent = new this.https.Agent({ keepAlive: true, maxSockets: 1 });
+      return this.pollAgent;
+    }
+    if (this.agent === null) this.agent = new this.https.Agent({ keepAlive: true, maxSockets: 1 });
+    return this.agent;
+  }
+
+  /** A lookup that serves this open period only: once it is closed it fails at once, with no I/O and no timer. */
+  private newGeneration(): Generation {
+    const generation: Generation = {
+      closed: false,
+      lookup: (hostname: string, options: unknown, callback: LookupCallback): void => {
+        if (!generation.closed) return this.resolve(hostname, options, callback);
+        const done = typeof options === 'function' ? (options as LookupCallback) : callback;
+        // asynchronous like Node's own lookup, through a promise job rather than a timer
+        Promise.resolve()
+          .then(() => done(Object.assign(new Error('the uplink was closed'), { code: 'EHOSTUNREACH' })))
+          .then(undefined, () => undefined);
+      },
+    };
+    return generation;
+  }
+
+  private readResponse(res: IncomingMessageLike, req: () => ClientRequestLike | null, finish: (error: UplinkError | null, value?: unknown) => void): void {
+    const status = typeof res.statusCode === 'number' ? res.statusCode : 0;
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let tooLarge = false;
+    res.on('data', (chunk: Buffer | string) => {
+      if (tooLarge) return;
+      const buffer = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk;
+      size += buffer.length;
+      if (size > MAX_RESPONSE_BYTES) {
+        tooLarge = true;
+        chunks.length = 0;
+        finish(new UplinkError('server-error', 'reply larger than ' + MAX_RESPONSE_BYTES + ' bytes'));
+        abortRequest(req());
+        return;
+      }
+      if (status >= 200 && status < 300) chunks.push(buffer); // an error reply's body is read and dropped
+    });
+    res.on('error', (error: unknown) => finish(toUplinkError(error)));
+    res.on('aborted', () => finish(new UplinkError('server-error', 'the reply was cut off')));
+    res.on('end', () => {
+      if (status < 200 || status >= 300) return finish(new UplinkError(statusKind(status), 'HTTP ' + status));
+      const text = Buffer.concat(chunks).toString('utf8');
+      if (status === 204 || text.trim() === '') return finish(null, undefined);
+      try {
+        finish(null, JSON.parse(text));
+      } catch {
+        finish(new UplinkError('server-error', 'the reply is not JSON'));
+      }
+    });
+  }
+}

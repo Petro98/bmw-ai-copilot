@@ -1,0 +1,12 @@
+<section class="block" aria-labelledby="login-heading">
+  <h2 class="phone-label heading" id="login-heading">ДОСТУП</h2>
+  <p class="explain">Введіть ключ доступу, заданий на сервері. Після входу цей телефон памʼятатиме вас 30 днів.</p>
+  <form class="form" (submit)="submit($event, token)">
+    <label class="field-label" for="login-token">Ключ доступу</label>
+    <input #token id="login-token" type="password" autocomplete="current-password" autocapitalize="off" spellcheck="false">
+    <button type="submit" class="primary" [disabled]="busy()">Увійти</button>
+    @if (error(); as message) {
+      <p class="message" role="alert">{{ message }}</p>
+    }
+  </form>
+</section>

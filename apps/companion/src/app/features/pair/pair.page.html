@@ -1,0 +1,27 @@
+<section class="block" aria-labelledby="pair-heading">
+  <h2 class="phone-label heading" id="pair-heading">ПІДʼЄДНАННЯ АВТО</h2>
+  @switch (state()) {
+    @case ('missing') {
+      <p class="explain">{{ text.missing }}</p>
+    }
+    @case ('invalid') {
+      <p class="message" role="alert">{{ text.invalid }}</p>
+    }
+    @case ('done') {
+      <p class="explain" role="status">{{ text.done }} Екран авто покаже це під час наступного звернення до сервера.</p>
+    }
+    @default {
+      <p class="explain" data-pair-check>{{ text.check }}</p>
+      <form class="form" (submit)="register($event, label)">
+        <span class="field-label">Пристрій</span>
+        <span class="device-id" data-device-id>{{ deviceId() }}</span>
+        <label class="field-label" for="pair-label">Назва</label>
+        <input #label id="pair-label" type="text" maxlength="60" autocomplete="off" [value]="defaultLabel">
+        <button type="submit" class="primary" [disabled]="state() === 'saving'">Підʼєднати</button>
+        @if (error(); as message) {
+          <p class="message" role="alert">{{ message }}</p>
+        }
+      </form>
+    }
+  }
+</section>

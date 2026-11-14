@@ -1,0 +1,103 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (Node 22)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+
+  node8:
+    # The head unit runs Node 8.16.2. The shared packages are built on Node 22, then the smoke test
+    # runs on the real Node 8.16.2 runtime (x86_64 Linux; Node 8 has no arm64 build).
+    name: node8 (smoke on Node 8.16.2)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run build -w @copilot/vehicle-core -w @copilot/event-engine
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 8.16.2
+      - name: Check the runtime is Node 8.16.2
+        run: test "$(node --version)" = "v8.16.2"
+      - name: Smoke test on Node 8.16.2
+        run: node scripts/node8-smoke.js
+
+  car:
+    # The head-unit app: bundles built and unit-tested on Node 22, then the app bundle is syntax-checked
+    # and the uplink smoke test runs on the real Node 8.16.2 runtime (x86_64 Linux).
+    name: car (build, tests, Node 8.16.2 checks)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run build:car
+      - name: The committed app bundle matches its sources
+        run: git diff --exit-code car/apps/p98_copilot/main.js
+      - run: npm test -w car
+      - name: Kit runtime tests
+        run: node car/kit/tools/test_runtime.js
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 8.16.2
+      - name: Check the runtime is Node 8.16.2
+        run: test "$(node --version)" = "v8.16.2"
+      - name: Syntax check of the app bundle on Node 8.16.2
+        run: node --check car/apps/p98_copilot/main.js
+      - name: Uplink smoke test on Node 8.16.2
+        run: node car/test/node8-uplink-smoke.js
+
+  companion:
+    # The phone panel: a standalone Angular project with its own lockfile (not an npm workspace). Its specs run
+    # headless (Vitest with jsdom); the build type-checks against packages/*/src through its tsconfig paths.
+    name: companion (tests, build)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/companion
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: apps/companion/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build

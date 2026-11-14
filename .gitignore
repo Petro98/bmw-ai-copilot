@@ -1,0 +1,46 @@
+# dependencies / build output
+node_modules/
+dist/
+.angular/
+coverage/
+*.tsbuildinfo
+# head-unit app: kit build staging (car/dist/ is covered by dist/ above) and offline preview PNGs
+car/build/
+car/preview/
+
+# secrets and local config — never commit
+.env
+.env.*
+!.env.example
+# car/scripts/publish-car.mjs: the deploy directory and the backend address (docs/CAR_INSTALL.md)
+.env.car
+!.env.car.example
+
+# local data
+*.sqlite
+*.sqlite-journal
+*.db
+data/
+
+# raw research notes kept locally (not published)
+.research/
+
+# never commit BMW proprietary material or anything identifying the car
+oap-sdk/
+reference/someip-interfaces.json
+*.mgu
+
+# editor / OS
+.idea/
+.vscode/
+.DS_Store
+
+# browser automation scratch
+.playwright-mcp/
+
+# SQLite side files
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.db-wal
+*.db-shm
